@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 140" role="img" aria-label="rubyx.net">
+  <defs>
+    <linearGradient id="wmGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#B91C3C"/>
+      <stop offset="50%" stop-color="#F43F5E"/>
+      <stop offset="100%" stop-color="#FF7A45"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(10 15)" fill="none" stroke="url(#wmGrad)" stroke-width="3" stroke-linejoin="miter">
+    <path d="M55 10 95 55 55 100 15 55Z"/>
+    <path d="M55 28 77 55 55 82 33 55Z"/>
+    <path d="M55 10v90M15 55h80"/>
+    <path d="M26 26l58 58M84 26 26 84"/>
+  </g>
+  <text x="120" y="92" fill="url(#wmGrad)" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="42" font-weight="600" letter-spacing="-0.02em">rubyx.net</text>
+</svg>
