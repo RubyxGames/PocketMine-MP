@@ -1,8 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Help & support on Discord
-    url: https://discord.gg/bmSAZBG
-    about: We don't accept support requests on the issue tracker. Please try asking on Discord instead.
-  - name: Documentation
-    url: https://pmmp.rtfd.io
-    about: PocketMine-MP documentation
+  - name: RubyxGames documentation
+    url: https://rubyxgames.github.io/website/docs/
+    about: Installation, Rubyx core features, and operations.
+  - name: Plugin development docs
+    url: https://rubyxgames.github.io/website/docs/developers/plugin-docs-index
+    about: PocketMine-MP plugin API (shared with Axolotl PM lineage).
+  - name: Axolotl-PM upstream
+    url: https://github.com/axolotl-pm/PocketMine-MP
+    about: Upstream fork this repository is based on.
