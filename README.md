@@ -1,12 +1,10 @@
-<div class="rubyx-pixel-hero-wrap align-center" align="center">
+<p class="rubyx-pixel-hero-wrap align-center" align="center">
 	<a href="https://rubyxgames.github.io/website/docs/">
-		<img src=".github/readme/rubyx-wordmark.svg" alt="RubyxGames" width="420" loading="lazy" />
+		<img src=".github/readme/rubyx-pixel-hero.png" alt="RubyxGames" width="554" loading="eager" />
 	</a>
-	<h1 class="rubyx-pixel-hero" aria-label="RubyxGames">
-		<span class="rubyx-pixel-ruby">Rubyx</span><span class="rubyx-pixel-games">Games</span>
-	</h1>
-	<p class="rubyx-pixel-tagline"><b>PocketMine-MP для Minecraft: Bedrock Edition · PHP</b></p>
-</div>
+	<br>
+	<b>PocketMine-MP · rubyx.net</b>
+</p>
 
 <p align="center">
 	<a href="https://github.com/RubyxGames/PocketMine-MP/actions/workflows/main.yml"><img src="https://github.com/RubyxGames/PocketMine-MP/actions/workflows/main.yml/badge.svg" alt="CI" /></a>
