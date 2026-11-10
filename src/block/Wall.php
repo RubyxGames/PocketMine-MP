@@ -94,6 +94,19 @@ class Wall extends Transparent{
 		}
 	}
 
+	/**
+	 * Recompute wall connections from neighbours and write the result back.
+	 *
+	 * @see HorizontalConnectableTrait::refreshConnections()
+	 */
+	public function refreshConnections(bool $updateNeighbours = false) : bool{
+		if(!$this->recalculateConnections()){
+			return false;
+		}
+		$this->position->getWorld()->setBlock($this->position, $this, $updateNeighbours);
+		return true;
+	}
+
 	protected function recalculateConnections() : bool{
 		$changed = 0;
 

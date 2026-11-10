@@ -56,6 +56,8 @@ class PluginDescription{
 	private const KEY_AUTHOR = "author";
 	private const KEY_AUTHORS = "authors";
 	private const KEY_PERMISSIONS = "permissions";
+	private const KEY_REQUIRES_CAPABILITIES = "requires-capabilities";
+	private const KEY_DATA_VERSION = "data-version";
 
 	private const KEY_COMMANDS = "commands";
 	private const KEY_COMMAND_PERMISSION = "permission";
@@ -117,6 +119,12 @@ class PluginDescription{
 	 * @phpstan-var array<string, list<Permission>>
 	 */
 	private array $permissions = [];
+	/**
+	 * @var string[]
+	 * @phpstan-var list<string>
+	 */
+	private array $requiresCapabilities = [];
+	private int $dataVersion = 0;
 
 	/**
 	 * @param string|mixed[] $yamlString
@@ -237,6 +245,14 @@ class PluginDescription{
 				throw new PluginDescriptionParseException("Invalid Plugin \"" . self::KEY_PERMISSIONS . "\": " . $e->getMessage(), 0, $e);
 			}
 		}
+
+		if(isset($plugin[self::KEY_REQUIRES_CAPABILITIES])){
+			$this->requiresCapabilities = array_values(array_map("\strval", (array) $plugin[self::KEY_REQUIRES_CAPABILITIES]));
+		}
+
+		if(isset($plugin[self::KEY_DATA_VERSION])){
+			$this->dataVersion = max(0, (int) $plugin[self::KEY_DATA_VERSION]);
+		}
 	}
 
 	public function getFullName() : string{
@@ -347,6 +363,23 @@ class PluginDescription{
 
 	public function getWebsite() : string{
 		return $this->website;
+	}
+
+	/**
+	 * Optional server capability ids this plugin needs (see ServerCapabilities).
+	 *
+	 * @return string[]
+	 * @phpstan-return list<string>
+	 */
+	public function getRequiresCapabilities() : array{
+		return $this->requiresCapabilities;
+	}
+
+	/**
+	 * Optional plugin data schema version from plugin.yml (0 = unset).
+	 */
+	public function getDataVersion() : int{
+		return $this->dataVersion;
 	}
 
 	/**

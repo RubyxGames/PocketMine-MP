@@ -1,0 +1,230 @@
+#If you want to help translate WorldEdit head over to
+#https://github.com/platz1de/WorldEdit/tree/dev/resources/lang/TRANSLATE.md
+
+message-version: "3.0.1" #Please don't change this manually
+
+#If you want to include double quotes (") in your messages please escape them with a backslash (\")
+
+prefix: "§l§aEasy§bEdit §r> "
+
+#Args: {x} {y} {z}
+selected-pos1: "Selected the first position as {x} {y} {z}"
+selected-pos2: "Selected the second position as {x} {y} {z}"
+
+deselected: "Deselected the current selection"
+
+no-selection: "You don't have an active selection"
+no-clipboard: "You don't have an active clipboard"
+
+#Args: {given} {expected}
+wrong-selection: "Your selection is of type {given}, but {expected} is required"
+
+no-history: "Nothing to undo"
+no-future: "Nothing to redo"
+
+no-task: "No task is currently running"
+task-cancelled: "Current task was cancelled"
+task-cancelled-self: "Your task was cancelled"
+
+#Args: {usage}
+wrong-usage: "Wrong command usage:\n{usage}"
+
+#Args: {usage} {flag}
+unknown-flag: "Unknown flag {flag}\n{usage}"
+
+#Args: {commands} {start} {end} {total}
+command-list: "Commands (showing {start} to {end} of {total}):\n{commands}"
+
+#Args: {message}
+task-crash: "§cYour task crashed, please report this!\n{message}"
+pattern-invalid: "§cThe pattern you entered is invalid:\n{message}"
+
+#Args: {time} {changed}
+blocks-set: "{changed} blocks were set in {time}s"
+blocks-copied: "{changed} blocks were copied in {time}s"
+blocks-pasted: "{changed} blocks were pasted in {time}s"
+blocks-rotated: "{changed} blocks were rotated in {time}s"
+blocks-flipped: "{changed} blocks were flipped in {time}s"
+blocks-cut: "{changed} blocks were cut in {time}s"
+
+#Args: {time} {changed} {blocks}
+blocks-counted: "{changed} blocks were counted in {time}s:\n{blocks}"
+
+#Args: {time} {changed} {name}
+schematic-created: "{changed} blocks were saved as \"{name}\" in {time}s"
+
+#Args: {task} {queue} {status} {progress} {storage} {mem_current} {mem_max}
+thread-stats: "Status of EditThread:\nStatus: {status}\nCurrent Task: {task}\nProgress: {progress}\nQueued tasks: {queue}\nStored selections: {storage}\nThread memory: {mem_current}MB ({mem_max}MB)"
+
+benchmark-start: "Started benchmark, this can take a few minutes..."
+benchmark-running: "There is already a benchmark running"
+
+#Args: {done} {total}
+benchmark-progress: "Benchmark progress: {done}/{total}"
+
+#Args: {tps_avg} {tps_min} {load_avg} {load_max} {tasks} {time} {results}
+benchmark-finished: "Your benchmark results:\nAverage TPS: {tps_avg} ({load_avg}%)\nMinimal TPS: {tps_min} ({load_max}%)\nExecuted {tasks} tasks in {time}s:\n{results}"
+
+#Args: {task} {name} {time} {blocks}
+benchmark-result: "#{task}: {name} - {blocks} in {time}s"
+
+#Args: {state} {id} {meta} {name} {x} {y} {z} {java_state}
+block-info: "{name} ({id}:{meta}) at {x} {y} {z}\nBlock state: {state}\nJava state: {java_state}"
+
+#Args: {schematic} {known}
+unknown-schematic: "Unknown schematic \"{schematic}\"\nKnown schematics: {known}"
+
+#Commands
+#Note: If command usages contains a short description, it should be spilt with a "-" (e.g. "help - Show this help")
+
+command-pos1-description: "Set the first position"
+command-pos1-usage: "//pos1 [x] [y] [z]"
+command-pos2-description: "Set the second position"
+command-pos2-usage: "//pos2 [x] [y] [z]"
+command-deselect-description: "Deselect the current selection"
+command-deselect-usage: "//deselect"
+command-extend-description: "Extend the selected area"
+command-extend-usage:
+  - "//extend [direction] [count]"
+  - "//extend [count] - Extend the selected area into your looking direction"
+  - "//extend vertical - Fully extend the selected Area vertically"
+  - "//extend --min <x>,<y>,<z> --max <x>,<y>,<z> - Modify the selected area by the given vectors"
+command-set-description: "Set blocks in the selected area"
+command-set-usage: "//set <pattern>"
+command-replace-description: "Replace blocks in the selected area"
+command-replace-usage:
+  - "//replace <block> <pattern>"
+  - "//replace <pattern> - Replace all solid blocks in the selected area"
+command-overlay-description: "Overlay blocks in the selected area"
+command-overlay-usage: "//overlay <pattern>"
+command-naturalize-description: "Naturalize the selected area"
+command-naturalize-usage: "//naturalize [pattern] [pattern] [pattern]"
+command-smooth-description: "Smooth the selected area"
+command-smooth-usage: "//smooth"
+command-center-description: "Set the center blocks of the selected area"
+command-center-usage: "//center [pattern]"
+command-walls-description: "Set the walls of the selected area"
+command-walls-usage: "//walls [pattern]"
+command-sides-description: "Set the sides of the selected area"
+command-sides-usage: "//sides [pattern]"
+command-move-description: "Move the selected area"
+command-move-usage:
+  - "//move [direction] [count]"
+  - "//move [count] - Move the selected area into your looking direction"
+  - "//move -v <x>,<y>,<z> - Move the selected area by the given vector"
+command-stack-description: "Stack the selected area"
+command-stack-usage:
+  - "//stack [direction] [count]"
+  - "//stack [count] - Stack the selected area into your looking direction"
+command-istack-description: "Stack the selected area without overwriting existing terrain"
+command-istack-usage:
+  - "//istack [direction] [count]"
+  - "//istack [count] - Stack the selected area into your looking direction"
+command-count-description: "Count blocks in the selected area"
+command-count-usage:
+  - "//count"
+  - "//count -d - Count blocks and show detailed block state information"
+  - "//count [radius] - Count blocks in the area around you"
+command-extinguish-description: "Extinguish fire in the selected area"
+command-extinguish-usage:
+  - "//extinguish"
+  - "//extinguish [radius] - Extinguish fire in the area around you"
+command-view-description: "View the selected area"
+command-view-usage: "//view"
+
+
+command-undo-description: "Revert your latest change"
+command-undo-usage:
+  - "//undo [count]"
+  - "//undo <target> [count] - Revert the latest change of the target"
+command-redo-description: "Redo your latest change"
+command-redo-usage:
+  - "//redo [count]"
+  - "//redo <target> [count] - Redo the latest change of the target"
+
+
+command-copy-description: "Copy the selected area"
+command-copy-usage:
+  - "//copy - Copy relative to the player"
+  - "//copy -c - Copy relative to center of the selection"
+command-cut-description: "Cut the selected area and copy it to your clipboard"
+command-cut-usage:
+  - "//cut - Cut relative to the player"
+  - "//cut -c - Cut relative to center of the selection"
+command-paste-description: "Paste the clipboard"
+command-paste-usage: "//paste"
+command-insert-description: "Insert the clipboard"
+command-insert-usage: "//insert"
+command-merge-description: "Merge current terrain with the clipboard"
+command-merge-usage: "//merge"
+command-rpaste-description: "Replace current terrain with the clipboard"
+command-rpaste-usage: "//rpaste"
+command-rotate-description: "Rotate the clipboard"
+command-rotate-usage: "//rotate"
+command-flip-description: "Flip the clipboard, mirroring at copied position"
+command-flip-usage:
+  - "//flip [direction]"
+  - "//flip - Flip the clipboard into your looking direction"
+command-loadschematic-description: "Load a saved schematic from disk"
+command-loadschematic-usage: "//loadschematic <schematicName>"
+command-saveschematic-description: "Save your clipboard as a schematic to disk"
+command-saveschematic-usage: "//saveschematic <schematicName>"
+
+
+command-sphere-description: "Generate a sphere"
+command-sphere-usage: "//sphere <radius> <pattern>"
+command-hsphere-description: "Generate a hollow sphere"
+command-hsphere-usage: "//hsphere <radius> <pattern> [thickness]"
+command-cylinder-description: "Generate a cylinder"
+command-cylinder-usage: "//cylinder <radius> <height> <pattern>"
+command-hcylinder-description: "Generate a hollow cylinder"
+command-hcylinder-usage: "//hcylinder <radius> <height> <pattern> [thickness]"
+command-noise-description: "Generate using a simple noise function"
+command-noise-usage: "//noise"
+command-cube-description: "Generate a cube"
+command-cube-usage: "//cube <size> <pattern>"
+command-hcube-description: "Generate a hollow cube"
+command-hcube-usage: "//hcube <size> <pattern> [thickness]"
+
+
+command-commands-description: "List all WorldEdit commands"
+command-commands-usage: "//commands [page]"
+command-brush-description: "Create a new brush"
+command-brush-usage:
+  - "//brush sphere [radius] [pattern] [gravity] - Create a spherical brush"
+  - "//brush smooth [radius] - Create a smoothing brush"
+  - "//brush naturalize [radius] [topBlock] [middleBlock] [bottomBlock] - Create a naturalize brush"
+  - "//brush cylinder [radius] [height] [pattern] [gravity] - Create a cylindrical brush"
+  - "//brush paste [insert] - Create a pasting brush"
+command-fill-description: "Fill an Area"
+command-fill-usage:
+  - "//fill <block> [direction]"
+  - "//fill <block> - Fill into your looking direction"
+command-drain-description: "Drain an Area"
+command-drain-usage: "//drain"
+command-line-description: "Generate a line"
+command-line-usage:
+  - "//line <x> <y> <z> [pattern] - Draw a direct line to given position"
+  - "//line find <x> <y> <z> [pattern] - Find a valid path to the destination (slow)"
+  - "//line solid <x> <y> <z> [pattern] - Find a solid path to the destination (slow)"
+command-blockinfo-description: "Get a blockinfo stick"
+command-blockinfo-usage: "//blockinfo"
+command-builderrod-description: "Create a builder rod"
+command-builderrod-usage: "//builderrod"
+command-status-description: "Get the status of the editing thread"
+command-status-usage: "//status"
+command-cancel-description: "Cancel the current task"
+command-cancel-usage: "//cancel"
+command-benchmark-description: "Start a benchmark"
+command-benchmark-usage: "//benchmark"
+command-pastestates-description: "Paste all known block states"
+command-pastestates-usage: "//pastestates"
+command-wand-description: "Get a wooden axe"
+command-wand-usage: "//wand"
+
+command-thru-description: "Teleport through blocks"
+command-thru-usage: "//thru"
+command-unstuck-description: "Teleport to a safe location"
+command-unstuck-usage: "//unstuck"
+command-up-description: "Teleport up"
+command-up-usage: "//up <amount>"

@@ -3,11 +3,47 @@
 #Choose whether players must use your chosen resource packs to join the server.
 #NOTE: This will do nothing if there are no resource packs in the stack below.
 force_resources: false
+
+# Recompress resource pack zips (DEFLATE) into a cache before sending to clients.
+# Originals under resource_packs/ are never modified.
+compress_packs: true
+# zlib/DEFLATE level 0..9 (9 = max compression, slower startup on cache miss)
+compress_level: 9
+# Cache directory name under resource_packs/ (must be a simple name, no path separators)
+compress_cache_dir: .compressed
+
+# Client download tuning (large packs / slow networks)
+# Chunk size sent to the client, in KiB (clamped 16..1024). Default 256.
+pack_chunk_size_kb: 256
+# How many pack chunks may be in flight per connecting player (clamped 1..8). Default 1 (safest).
+# Raise to 2-4 if clients stall on "Downloading" with large packs; lower if they choke.
+pack_chunk_concurrency: 1
+
 resource_stack:
   #Resource packs here are applied from bottom to top. This means that resources in higher packs will override those in lower packs.
-  #Entries here must indicate the filename of the resource pack.
+  #Entries: zip/mcpack filename, folder with manifest.json, OR map with pack + key_file.
+  #Folder packs are zipped into compress_cache_dir automatically (originals are never modified).
   #Example
   # - natural.zip
-  # - vanilla.zip
+  # - MyHudPack
+  # - pack: secret.zip
+  #   key_file: secret.zip.key
   #If you want to force clients to use vanilla resources, you must place a vanilla resource pack in your resources folder and add it to the stack here.
-  #To specify a resource encryption key, put the key in the <resource>.key file alongside the resource pack. Example: vanilla.zip.key
+  #Encryption: place <pack>.key (exactly 32 bytes) next to the pack, or set key_file on the entry.
+
+# Optional stacks keyed by world folder name. At login the default world's stack is offered if present; else resource_stack.
+# Changing packs after join requires the player to reconnect (Bedrock cannot hot-swap packs).
+#world_stacks:
+#  lobby:
+#    - lobby_ui.zip
+#  arena:
+#    - DBD_UI.zip
+
+# Optional named stacks for plugins (ResourcePackManager::getNamedStack).
+#named_stacks:
+#  dbd_match:
+#    - DBD_UI.zip
+
+# Optional CDN URLs (pack UUID or filename => HTTPS URL). Local packs remain required as fallback.
+#cdn_urls:
+#  e2a8c4f1-9b3d-4a7e-8c1d-2f4a6b8c0d1e: "https://cdn.example.com/DBD_UI.zip"

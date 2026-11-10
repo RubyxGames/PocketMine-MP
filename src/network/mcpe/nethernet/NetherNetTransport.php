@@ -108,11 +108,11 @@ final class NetherNetTransport implements Transport{
 
 	private function getUnavailableReason() : ?string{
 		if(!extension_loaded("webrtc")){
-			return "the axolotl-pm/ext-webrtc extension is not loaded";
+			return "the axolotl-pm/ext-webrtc extension is not loaded; install PHP from https://github.com/axolotl-pm/PHP-Binaries (see docs/nethernet.md). Other transports (e.g. raknet) can still start";
 		}
 		$version = phpversion("webrtc");
 		if($version !== false && (version_compare($version, self::MIN_WEBRTC_VERSION, "<") || version_compare($version, self::MAX_WEBRTC_VERSION, ">="))){
-			return "ext-webrtc ^" . self::MIN_WEBRTC_VERSION . " is required (found $version)";
+			return "ext-webrtc ^" . self::MIN_WEBRTC_VERSION . " is required (found $version); use RubyxGames PHP-Binaries matching this server version (see docs/nethernet.md)";
 		}
 		return null;
 	}
@@ -148,14 +148,6 @@ final class NetherNetTransport implements Transport{
 				$bindAddress === "0.0.0.0" ? null : $bindAddress,
 				$configGroup->getProperty(Yml::TRANSPORT_NETHERNET_ADVERTISE_ADDRESSES)
 			);
-			if(
-				$configGroup->getConfigBool(ServerProperties::ENABLE_QUERY, true) &&
-				$iceConfig->isUdpMux() &&
-				$iceConfig->getPortRangeBegin() === $this->server->getPort() &&
-				$iceConfig->getPortRangeEnd() === $this->server->getPort()
-			){
-				throw new NetworkInterfaceStartException(Yml::TRANSPORT_NETHERNET_PORT_RANGE . " cannot be only the server port while " . ServerProperties::ENABLE_QUERY . " and " . Yml::TRANSPORT_NETHERNET_ICE_UDP_MUX . " are enabled, as the query port is already in use");
-			}
 			$mtu = $configGroup->getPropertyInt(Yml::TRANSPORT_NETHERNET_MTU, WebRtcTransportFactory::DEFAULT_MTU);
 			if($mtu < WebRtcTransportFactory::MIN_MTU || $mtu > WebRtcTransportFactory::MAX_MTU){
 				throw new \InvalidArgumentException("mtu must be between " . WebRtcTransportFactory::MIN_MTU . " and " . WebRtcTransportFactory::MAX_MTU . ", got $mtu");
@@ -260,7 +252,12 @@ final class NetherNetTransport implements Transport{
 			throw new \InvalidArgumentException(Yml::TRANSPORT_NETHERNET_BUILTIN_SIGNALING_TLS_CERTIFICATE . " and " . Yml::TRANSPORT_NETHERNET_BUILTIN_SIGNALING_TLS_KEY . " must be set together");
 		}
 		if($certificate === ""){
-			$this->server->getLogger()->notice($this->server->getLanguage()->translate(KnownTranslationFactory::pocketmine_server_nethernet_tls_disabled()));
+			// Plain HTTP is intentional when TLS terminates at a reverse proxy, or for LAN/dev.
+			// Cert paths live in pocketmine.yml under transport.nethernet.builtin-signaling.tls.*
+			$reverseProxy = $configGroup->getPropertyBool(Yml::TRANSPORT_NETHERNET_BUILTIN_SIGNALING_REVERSE_PROXY_ENABLED, false);
+			if(!$reverseProxy){
+				$this->server->getLogger()->debug($this->server->getLanguage()->translate(KnownTranslationFactory::pocketmine_server_nethernet_tls_disabled()));
+			}
 			return [null, null, null];
 		}
 
@@ -314,6 +311,9 @@ final class NetherNetTransport implements Transport{
 		$previousUmask = umask(0077);
 		try{
 			Filesystem::safeFilePutContents($path, $pem);
+			$this->server->getLogger()->warning(
+				"Created new NetherNet identity key at $path. Back this file up; replacing or deleting it will force returning players to re-trust the server (TOFU prompt)."
+			);
 		}catch(\RuntimeException $e){
 			$this->server->getLogger()->error($this->server->getLanguage()->translate(KnownTranslationFactory::pocketmine_server_nethernet_identityKeySaveFailed($path)));
 		}finally{

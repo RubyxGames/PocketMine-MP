@@ -29,10 +29,12 @@ use pocketmine\command\defaults\BanListCommand;
 use pocketmine\command\defaults\ClearCommand;
 use pocketmine\command\defaults\DefaultGamemodeCommand;
 use pocketmine\command\defaults\DeopCommand;
+use pocketmine\command\defaults\DduiCommand;
 use pocketmine\command\defaults\DifficultyCommand;
 use pocketmine\command\defaults\DumpMemoryCommand;
 use pocketmine\command\defaults\EffectCommand;
 use pocketmine\command\defaults\EnchantCommand;
+use pocketmine\command\defaults\GameRuleCommand;
 use pocketmine\command\defaults\GamemodeCommand;
 use pocketmine\command\defaults\GarbageCollectorCommand;
 use pocketmine\command\defaults\GiveCommand;
@@ -45,18 +47,23 @@ use pocketmine\command\defaults\OpCommand;
 use pocketmine\command\defaults\PardonCommand;
 use pocketmine\command\defaults\PardonIpCommand;
 use pocketmine\command\defaults\ParticleCommand;
+use pocketmine\command\defaults\PluginManageCommand;
 use pocketmine\command\defaults\PluginsCommand;
 use pocketmine\command\defaults\SaveCommand;
 use pocketmine\command\defaults\SaveOffCommand;
 use pocketmine\command\defaults\SaveOnCommand;
 use pocketmine\command\defaults\SayCommand;
 use pocketmine\command\defaults\SeedCommand;
+use pocketmine\command\defaults\ResourcePacksCommand;
+use pocketmine\command\defaults\SessionRecordCommand;
 use pocketmine\command\defaults\SetWorldSpawnCommand;
+use pocketmine\command\defaults\SpawnCommand;
 use pocketmine\command\defaults\SpawnpointCommand;
 use pocketmine\command\defaults\StatusCommand;
 use pocketmine\command\defaults\StopCommand;
 use pocketmine\command\defaults\TeleportCommand;
 use pocketmine\command\defaults\TellCommand;
+use pocketmine\command\defaults\TickCommand;
 use pocketmine\command\defaults\TimeCommand;
 use pocketmine\command\defaults\TimingsCommand;
 use pocketmine\command\defaults\TitleCommand;
@@ -64,6 +71,7 @@ use pocketmine\command\defaults\TransferServerCommand;
 use pocketmine\command\defaults\VanillaCommand;
 use pocketmine\command\defaults\VersionCommand;
 use pocketmine\command\defaults\WhitelistCommand;
+use pocketmine\command\defaults\WorldCommand;
 use pocketmine\command\defaults\XpCommand;
 use pocketmine\command\utils\CommandStringHelper;
 use pocketmine\command\utils\InvalidCommandSyntaxException;
@@ -102,9 +110,11 @@ class SimpleCommandMap implements CommandMap{
 			new DefaultGamemodeCommand(),
 			new DeopCommand(),
 			new DifficultyCommand(),
+			new DduiCommand(),
 			new DumpMemoryCommand(),
 			new EffectCommand(),
 			new EnchantCommand(),
+			new GameRuleCommand(),
 			new GamemodeCommand(),
 			new GarbageCollectorCommand(),
 			new GiveCommand(),
@@ -118,23 +128,29 @@ class SimpleCommandMap implements CommandMap{
 			new PardonIpCommand(),
 			new ParticleCommand(),
 			new PluginsCommand(),
+			new PluginManageCommand(),
 			new SaveCommand(),
 			new SaveOffCommand(),
 			new SaveOnCommand(),
 			new SayCommand(),
 			new SeedCommand(),
+			new ResourcePacksCommand(),
+			new SessionRecordCommand(),
 			new SetWorldSpawnCommand(),
+			new SpawnCommand(),
 			new SpawnpointCommand(),
 			new StatusCommand(),
 			new StopCommand(),
 			new TeleportCommand(),
 			new TellCommand(),
+			new TickCommand(),
 			new TimeCommand(),
 			new TimingsCommand(),
 			new TitleCommand(),
 			new TransferServerCommand(),
 			new VersionCommand(),
 			new WhitelistCommand(),
+			new WorldCommand(),
 			new XpCommand(),
 		]);
 	}

@@ -24,6 +24,7 @@ declare(strict_types=1);
 namespace pocketmine\world\format\io;
 
 use pocketmine\data\bedrock\block\BlockStateDeserializeException;
+use pocketmine\data\bedrock\block\UnknownBlockStateStore;
 use pocketmine\data\bedrock\block\BlockStateDeserializer;
 use pocketmine\data\bedrock\block\BlockStateSerializer;
 use pocketmine\data\bedrock\block\upgrade\BlockDataUpgrader;
@@ -72,7 +73,6 @@ abstract class BaseWorldProvider implements WorldProvider{
 		$newPalette = [];
 		$blockDecodeErrors = [];
 		foreach($palette as $k => $legacyIdMeta){
-			//TODO: remember data for unknown states so we can implement them later
 			$id = $legacyIdMeta >> 4;
 			$meta = $legacyIdMeta & 0xf;
 			try{
@@ -85,9 +85,13 @@ abstract class BaseWorldProvider implements WorldProvider{
 			try{
 				$newPalette[] = $this->blockStateDeserializer->deserialize($newStateData);
 			}catch(BlockStateDeserializeException $e){
-				//this should never happen anyway - if the upgrader returned an invalid state, we have bigger problems
 				$blockDecodeErrors[] = "Palette offset $k / Failed to deserialize upgraded state $id:$meta: " . $e->getMessage();
-				$newPalette[] = $this->blockStateDeserializer->deserialize(GlobalBlockStateHandlers::getUnknownBlockStateData());
+				// Preserve upgraded (or fallback) BlockStateData for round-trip when possible
+				if($newStateData !== GlobalBlockStateHandlers::getUnknownBlockStateData()){
+					$newPalette[] = UnknownBlockStateStore::register($newStateData);
+				}else{
+					$newPalette[] = $this->blockStateDeserializer->deserialize(GlobalBlockStateHandlers::getUnknownBlockStateData());
+				}
 			}
 		}
 

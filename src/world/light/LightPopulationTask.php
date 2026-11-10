@@ -31,23 +31,33 @@ use pocketmine\world\format\LightArray;
 use pocketmine\world\SimpleChunkManager;
 use pocketmine\world\utils\SubChunkExplorer;
 use pocketmine\world\World;
+use function count;
+use function explode;
 use function igbinary_serialize;
 use function igbinary_unserialize;
 
 class LightPopulationTask extends AsyncTask{
 	private const TLS_KEY_COMPLETION_CALLBACK = "onCompletion";
 
+	/** Serialized center + optional 3×3 neighbor terrain for border light. */
 	public string $chunk;
+	public string $neighbors;
 
 	private string $resultHeightMap;
 	private string $resultSkyLightArrays;
 	private string $resultBlockLightArrays;
 
 	/**
+	 * @param array<string, Chunk> $neighborChunks relative "dx:dz" => Chunk (excluding 0:0 center; optional)
 	 * @phpstan-param \Closure(array<int, LightArray> $blockLight, array<int, LightArray> $skyLight, non-empty-list<int> $heightMap) : void $onCompletion
 	 */
-	public function __construct(Chunk $chunk, \Closure $onCompletion){
+	public function __construct(Chunk $chunk, \Closure $onCompletion, array $neighborChunks = []){
 		$this->chunk = FastChunkSerializer::serializeTerrain($chunk);
+		$serializedNeighbors = [];
+		foreach($neighborChunks as $key => $neighbor){
+			$serializedNeighbors[$key] = FastChunkSerializer::serializeTerrain($neighbor);
+		}
+		$this->neighbors = igbinary_serialize($serializedNeighbors);
 		$this->storeLocal(self::TLS_KEY_COMPLETION_CALLBACK, $onCompletion);
 	}
 
@@ -56,6 +66,24 @@ class LightPopulationTask extends AsyncTask{
 
 		$manager = new SimpleChunkManager(World::Y_MIN, World::Y_MAX);
 		$manager->setChunk(0, 0, $chunk);
+
+		/** @var array<string, string> $neighborPayloads */
+		$neighborPayloads = igbinary_unserialize($this->neighbors);
+		foreach($neighborPayloads as $key => $payload){
+			$parts = explode(":", $key, 2);
+			if(count($parts) !== 2){
+				continue;
+			}
+			$dx = (int) $parts[0];
+			$dz = (int) $parts[1];
+			if($dx === 0 && $dz === 0){
+				continue;
+			}
+			if($dx < -1 || $dx > 1 || $dz < -1 || $dz > 1){
+				continue;
+			}
+			$manager->setChunk($dx, $dz, FastChunkSerializer::deserializeTerrain($payload));
+		}
 
 		$blockFactory = RuntimeBlockStateRegistry::getInstance();
 		foreach([

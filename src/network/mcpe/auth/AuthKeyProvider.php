@@ -45,11 +45,80 @@ class AuthKeyProvider{
 
 	private int $lastFetch = 0;
 
+	######################
+	/**
+	 * RubyxNet: Добавлен $cachePath для кэширования ключей на диске.
+	 * При старте сервера:
+	 * 1) Сразу загружаются кэшированные ключи из файла (0.001 сек) -> первый зашедший игрок не ждёт сеть.
+	 * 2) Параллельно в фоне запускается fetchKeys() для актуализации ключей.
+	 */
 	public function __construct(
 		private readonly \Logger $logger,
 		private readonly AsyncPool $asyncPool,
-		private readonly int $keyRefreshIntervalSeconds = self::ALLOWED_REFRESH_INTERVAL
-	){}
+		private readonly int $keyRefreshIntervalSeconds = self::ALLOWED_REFRESH_INTERVAL,
+		private readonly ?string $cachePath = null
+	){
+		$this->loadFromCache();
+		$this->fetchKeys();
+	}
+
+	/**
+	 * RubyxNet: Загрузка валидных открытых ключей из локального JSON-файла.
+	 */
+	private function loadFromCache() : void{
+		if($this->cachePath === null || !file_exists($this->cachePath)){
+			return;
+		}
+		$raw = @file_get_contents($this->cachePath);
+		if($raw === false){
+			return;
+		}
+		try{
+			$data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+			if(is_array($data) && isset($data["issuer"], $data["keys"]) && is_string($data["issuer"]) && is_array($data["keys"])){
+				$pemKeys = [];
+				foreach($data["keys"] as $kid => $b64Key){
+					if(is_string($b64Key)){
+						$der = base64_decode($b64Key, true);
+						if($der !== false){
+							$pemKeys[$kid] = $der;
+						}
+					}
+				}
+				if(count($pemKeys) > 0){
+					$this->keyring = new AuthKeyring($data["issuer"], $pemKeys);
+					$this->lastFetch = (int) ($data["timestamp"] ?? time());
+					$this->logger->info("Loaded " . count($pemKeys) . " cached authentication keys from disk");
+				}
+			}
+		}catch(\Throwable $e){
+			$this->logger->debug("Failed to load cached auth keys: " . $e->getMessage());
+		}
+	}
+
+	/**
+	 * RubyxNet: Сохранение полученных ключей на диск в base64 для повторного использования.
+	 */
+	private function saveToCache(string $issuer, array $pemKeys) : void{
+		if($this->cachePath === null){
+			return;
+		}
+		try{
+			$b64Keys = [];
+			foreach($pemKeys as $kid => $derKey){
+				$b64Keys[$kid] = base64_encode($derKey);
+			}
+			$data = [
+				"timestamp" => time(),
+				"issuer" => $issuer,
+				"keys" => $b64Keys
+			];
+			@file_put_contents($this->cachePath, json_encode($data, JSON_PRETTY_PRINT));
+		}catch(\Throwable $e){
+			$this->logger->debug("Failed to save auth keys to cache: " . $e->getMessage());
+		}
+	}
+	######################
 
 	/**
 	 * Fetches the key for the given key ID.
@@ -139,6 +208,10 @@ class AuthKeyProvider{
 					$this->logger->info("Successfully fetched " . count($keys) . " new authentication keys from issuer $issuer, key IDs: " . implode(", ", array_keys($pemKeys)));
 					$this->keyring = new AuthKeyring($issuer, $pemKeys);
 					$this->lastFetch = time();
+					######################
+					// RubyxNet: Сохраняем свежие ключи в кэш на диск
+					$this->saveToCache($issuer, $pemKeys);
+					######################
 					$resolver->resolve($this->keyring);
 				}
 			}

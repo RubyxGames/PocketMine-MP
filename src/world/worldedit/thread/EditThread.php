@@ -1,0 +1,219 @@
+<?php
+
+namespace pocketmine\world\worldedit\thread;
+
+use pocketmine\world\worldedit\WorldEdit;
+use pocketmine\world\worldedit\environment\EditThreadHandler;
+use pocketmine\world\worldedit\session\SessionIdentifier;
+use pocketmine\world\worldedit\task\CancelException;
+use pocketmine\world\worldedit\thread\chunk\ChunkRequestManager;
+use pocketmine\world\worldedit\thread\input\InputData;
+use pocketmine\world\worldedit\thread\output\OutputData;
+use pocketmine\world\worldedit\thread\output\TaskResultData;
+use pocketmine\world\worldedit\utils\ConfigManager;
+use pocketmine\world\worldedit\utils\ExtendedBinaryStream;
+use pocketmine\network\mcpe\convert\TypeConverter;
+use pocketmine\thread\log\ThreadSafeLogger;
+use pocketmine\thread\Thread;
+use Throwable;
+
+class EditThread extends Thread
+{
+	/**
+	 * @var ThreadSafeLogger
+	 */
+	private ThreadSafeLogger $logger;
+	/**
+	 * @var ThreadStats
+	 */
+	private ThreadStats $stats;
+	private static EditThread $instance;
+
+	private string $inputData;
+	private string $outputData;
+
+	/**
+	 * EditThread constructor.
+	 * @param ThreadSafeLogger $logger
+	 */
+	public function __construct(ThreadSafeLogger $logger)
+	{
+		self::$instance = $this;
+		$this->logger = $logger;
+		$this->stats = ThreadStats::getInstance();
+	}
+
+
+	public function onRun(): void
+	{
+		gc_enable();
+
+		WorldEdit::setEnvironment(new EditThreadHandler());
+
+		$this->getLogger()->debug("Started EditThread");
+
+		while (!$this->isKilled) {
+			$this->stats->updateMemory();
+			try {
+				$this->parseInput(); //This can easily throw an exception when cancelling in an unexpected moment
+			} catch (Throwable $throwable) {
+				$this->logger->logException($throwable);
+			}
+			$task = ThreadData::getNextTask();
+			if ($task === null) {
+				$this->synchronized(function (): void {
+					if (!isset($this->inputData) && !$this->isKilled) {
+						$this->wait();
+					}
+				});
+			} else {
+				ThreadData::clear();
+				$this->stats->startTask($task);
+				$this->debug("Running task " . $task->getTaskName() . ":" . $task->getTaskId());
+				$this->sendOutput(new TaskResultData($task->getTaskId(), $task->run()->getRawPayload()));
+				ChunkRequestManager::clear();
+			}
+		}
+	}
+
+	public function waitForData(): void
+	{
+		$this->synchronized(function (): void {
+			if (!isset($this->inputData) && !$this->isKilled) {
+				$this->wait();
+			}
+		});
+		$this->parseInput();
+	}
+
+	/**
+	 * @return ThreadSafeLogger
+	 */
+	public function getLogger(): ThreadSafeLogger
+	{
+		return $this->logger;
+	}
+
+	/**
+	 * @param string $message
+	 * @return void
+	 */
+	public function debug(string $message): void
+	{
+		if (ConfigManager::isSendingDebug()) {
+			$this->logger->debug($message);
+		}
+	}
+
+	/**
+	 * @return EditThread
+	 */
+	public static function getInstance(): EditThread
+	{
+		$thread = self::getCurrentThread();
+		if (!$thread instanceof self) {
+			return self::$instance;
+		}
+		return $thread;
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getThreadName(): string
+	{
+		return "WorldEdit editing";
+	}
+
+	/**
+	 * @throws CancelException
+	 */
+	public function checkExecution(): void
+	{
+		if ($this->isKilled || ThreadData::requiresCancel()) {
+			throw new CancelException();
+		}
+	}
+
+	public function parseInput(): void
+	{
+		if (isset($this->inputData)) {
+			$input = $this->synchronized(function (): string {
+				$input = $this->inputData;
+				unset($this->inputData);
+				return $input;
+			});
+			$stream = new ExtendedBinaryStream($input);
+
+			while (!$stream->feof()) {
+				$data = InputData::fastDeserialize($stream->getString());
+				$this->debug("Received IN: " . $data::class);
+				$data->handle();
+			}
+		}
+	}
+
+	public function parseOutput(): void
+	{
+		if (isset($this->outputData)) {
+			$output = $this->synchronized(function (): string {
+				$output = $this->outputData;
+				unset($this->outputData);
+				return $output;
+			});
+			$stream = new ExtendedBinaryStream($output);
+
+			while (!$stream->feof()) {
+				$data = OutputData::fastDeserialize($stream->getString());
+				$start = microtime(true);
+				$data->handle();
+				$this->debug("Handled OUT: " . $data::class . " in " . (microtime(true) - $start) . "s");
+			}
+		}
+	}
+
+	/**
+	 * @param InputData $data
+	 */
+	public function sendToThread(InputData $data): void
+	{
+		$this->stats->preProcessInput($data);
+		$add = $data->fastSerialize();
+		$this->synchronized(function (string $add): void {
+			$stream = new ExtendedBinaryStream($this->inputData ?? "");
+			$stream->putString($add);
+			$this->inputData = $stream->getBuffer();
+
+			$this->notify();
+		}, $add);
+	}
+
+	/**
+	 * @param OutputData $data
+	 * @internal
+	 */
+	public function sendOutput(OutputData $data): void
+	{
+		$this->stats->preProcessOutput($data);
+		$add = $data->fastSerialize();
+		$this->synchronized(function (string $add): void {
+			$stream = new ExtendedBinaryStream($this->outputData ?? "");
+			$stream->putString($add);
+			$this->outputData = $stream->getBuffer();
+		}, $add);
+	}
+
+	public function quit(): void
+	{
+		ThreadData::requirePause(SessionIdentifier::internal("Thread shutdown"));
+		parent::quit();
+	}
+
+	/**
+	 * @return ThreadStats
+	 */
+	public function getStats(): ThreadStats
+	{
+		return $this->stats;
+	}
+}

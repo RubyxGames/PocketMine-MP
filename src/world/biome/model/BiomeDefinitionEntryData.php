@@ -36,6 +36,15 @@ final class BiomeDefinitionEntryData{
 	/** @required */
 	public float $downfall;
 
+	//not present in the data of biomes added in 1.26.60
+	public float $redSporeDensity = 0.0;
+
+	public float $blueSporeDensity = 0.0;
+
+	public float $ashDensity = 0.0;
+
+	public float $whiteAshDensity = 0.0;
+
 	/** @required */
 	public float $foliageSnow;
 

@@ -41,17 +41,26 @@ use pocketmine\world\generator\InvalidGeneratorOptionsException;
 use Symfony\Component\Filesystem\Path;
 use function array_keys;
 use function array_shift;
+use function array_values;
 use function assert;
 use function count;
+use function file_exists;
 use function floor;
 use function implode;
 use function intdiv;
+use function is_dir;
 use function iterator_to_array;
 use function microtime;
+use function rename;
 use function round;
+use function rtrim;
+use function scandir;
+use function sort;
 use function sprintf;
+use function str_contains;
 use function strval;
 use function trim;
+use const SCANDIR_SORT_NONE;
 
 class WorldManager{
 	public const TICKS_PER_AUTOSAVE = 300 * Server::TARGET_TICKS_PER_SECOND;
@@ -253,7 +262,29 @@ class WorldManager{
 
 		(new WorldLoadEvent($world))->call();
 
+		$this->preloadSpawnChunks($world);
+
 		return true;
+	}
+
+	/**
+	 * Warm spawn terrain so the first player does not wait on a cold LevelDB read
+	 * for the same radius used by chunk-sending.spawn-radius.
+	 */
+	private function preloadSpawnChunks(World $world) : void{
+		$radius = max(1, $this->server->getConfigGroup()->getPropertyInt("chunk-sending.spawn-radius", 4));
+		$spawn = $world->getSpawnLocation();
+		$cx = $spawn->getFloorX() >> Chunk::COORD_BIT_SIZE;
+		$cz = $spawn->getFloorZ() >> Chunk::COORD_BIT_SIZE;
+		$loaded = 0;
+		for($x = $cx - $radius; $x <= $cx + $radius; ++$x){
+			for($z = $cz - $radius; $z <= $cz + $radius; ++$z){
+				if($world->loadChunk($x, $z) !== null){
+					++$loaded;
+				}
+			}
+		}
+		$this->server->getLogger()->debug("Preloaded $loaded spawn chunks for world \"" . $world->getFolderName() . "\" (radius $radius)");
 	}
 
 	/**
@@ -279,6 +310,7 @@ class WorldManager{
 		(new WorldInitEvent($world))->call();
 
 		(new WorldLoadEvent($world))->call();
+		$this->preloadSpawnChunks($world);
 
 		if($backgroundGeneration){
 			$this->server->getLogger()->notice($this->server->getLanguage()->translate(KnownTranslationFactory::pocketmine_level_backgroundGeneration($name)));
@@ -309,8 +341,149 @@ class WorldManager{
 		return true;
 	}
 
-	private function getWorldPath(string $name) : string{
+	public function getWorldPath(string $name) : string{
 		return Path::join($this->dataPath, $name) . "/"; //TODO: check if we still need the trailing dirsep (I'm a little scared to remove it)
+	}
+
+	/**
+	 * Folder names under the worlds data path that look like generated worlds (loaded or not).
+	 *
+	 * @return list<string>
+	 */
+	public function getWorldFolderNames() : array{
+		if(!is_dir($this->dataPath)){
+			return [];
+		}
+		$names = [];
+		$entries = scandir($this->dataPath, SCANDIR_SORT_NONE);
+		if($entries === false){
+			return [];
+		}
+		foreach($entries as $entry){
+			if($entry === "." || $entry === ".."){
+				continue;
+			}
+			if($this->isWorldGenerated($entry)){
+				$names[] = $entry;
+			}
+		}
+		sort($names);
+		return array_values($names);
+	}
+
+	/**
+	 * Copies a world folder on disk and optionally loads the clone.
+	 * Source must have no players; if loaded, it is briefly unloaded for a safe LevelDB copy.
+	 *
+	 * @throws \InvalidArgumentException
+	 * @throws WorldException
+	 */
+	public function cloneWorld(string $sourceName, string $destName, bool $loadAfter = true) : ?World{
+		return (new WorldCloner($this))->cloneWorld($sourceName, $destName, $loadAfter);
+	}
+
+	/**
+	 * Deletes a world folder from disk. Moves players to the default world first.
+	 * Refuses to delete the current default world.
+	 *
+	 * @throws \InvalidArgumentException
+	 * @throws WorldException
+	 */
+	public function deleteWorld(string $name) : void{
+		$name = $this->validateWorldFolderName($name);
+		if(!$this->isWorldGenerated($name)){
+			throw new \InvalidArgumentException("World \"$name\" does not exist on disk");
+		}
+		$world = $this->getWorldByName($name);
+		if($world !== null && $world === $this->defaultWorld){
+			throw new \InvalidArgumentException("Cannot delete the default world");
+		}
+		if($world !== null){
+			$fallback = $this->defaultWorld;
+			foreach($world->getPlayers() as $player){
+				if($fallback !== null){
+					try{
+						$player->teleport($fallback->getSafeSpawn());
+					}catch(WorldException){
+						$player->disconnect("World deleted");
+					}
+				}else{
+					$player->disconnect("World deleted");
+				}
+			}
+			if(!$this->unloadWorld($world, true)){
+				throw new WorldException("Failed to unload world \"$name\" for deletion");
+			}
+		}
+		$path = rtrim($this->getWorldPath($name), "/\\");
+		if(is_dir($path)){
+			\pocketmine\utils\Filesystem::recursiveUnlink($path);
+		}
+	}
+
+	/**
+	 * Renames a world folder and LevelName. Refuses to rename the default world.
+	 *
+	 * @throws \InvalidArgumentException
+	 * @throws WorldException
+	 */
+	public function renameWorld(string $from, string $to) : void{
+		$from = $this->validateWorldFolderName($from);
+		$to = $this->validateWorldFolderName($to);
+		if($from === $to){
+			throw new \InvalidArgumentException("Source and destination names must differ");
+		}
+		if(!$this->isWorldGenerated($from)){
+			throw new \InvalidArgumentException("World \"$from\" does not exist on disk");
+		}
+		$toPath = rtrim($this->getWorldPath($to), "/\\");
+		if(file_exists($toPath)){
+			throw new \InvalidArgumentException("World \"$to\" already exists");
+		}
+		$world = $this->getWorldByName($from);
+		if($world !== null && $world === $this->defaultWorld){
+			throw new \InvalidArgumentException("Cannot rename the default world");
+		}
+		if($world !== null){
+			if(count($world->getPlayers()) > 0){
+				throw new WorldException("Cannot rename world \"$from\" while players are inside; move them out first");
+			}
+			$world->save(true);
+			if(!$this->unloadWorld($world, true)){
+				throw new WorldException("Failed to unload world \"$from\" for rename");
+			}
+		}
+		$fromPath = rtrim($this->getWorldPath($from), "/\\");
+		if(!rename($fromPath, $toPath)){
+			throw new WorldException("Failed to rename world folder \"$from\" -> \"$to\"");
+		}
+		// Reuse cloner LevelName rewrite via temporary WorldCloner reflection-free path:
+		$providers = $this->providerManager->getMatchingProviders($toPath . "/");
+		if(count($providers) === 1){
+			$entry = array_shift($providers);
+			$provider = $entry->fromPath($toPath . "/", new \PrefixedLogger($this->server->getLogger(), "WorldRename: $to"));
+			try{
+				$data = $provider->getWorldData();
+				$data->setName($to);
+				$data->save();
+			}finally{
+				$provider->close();
+			}
+		}
+		if(!$this->loadWorld($to)){
+			throw new WorldException("Renamed world to \"$to\" but failed to load it");
+		}
+	}
+
+	/**
+	 * @throws \InvalidArgumentException
+	 */
+	private function validateWorldFolderName(string $name) : string{
+		$name = trim($name);
+		if($name === "" || $name === "." || $name === ".." || str_contains($name, "/") || str_contains($name, "\\")){
+			throw new \InvalidArgumentException("Invalid world name \"$name\"");
+		}
+		return $name;
 	}
 
 	public function isWorldGenerated(string $name) : bool{

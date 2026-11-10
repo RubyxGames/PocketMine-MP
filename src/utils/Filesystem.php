@@ -34,8 +34,10 @@ use function file_get_contents;
 use function file_put_contents;
 use function flock;
 use function fopen;
+use function fsync;
 use function ftruncate;
 use function fwrite;
+use function is_resource;
 use function getmypid;
 use function is_dir;
 use function is_file;
@@ -51,6 +53,7 @@ use function str_replace;
 use function str_starts_with;
 use function stream_get_contents;
 use function strlen;
+use function substr;
 use function uksort;
 use function unlink;
 use const DIRECTORY_SEPARATOR;
@@ -74,8 +77,29 @@ final class Filesystem{
 	public const CLEAN_PATH_SRC_PREFIX = "pmsrc";
 	public const CLEAN_PATH_PLUGINS_PREFIX = "plugins";
 
+	/** When true, safeFilePutContents fsyncs the temp file before rename. */
+	private static bool $fsyncEnabled = true;
+	/** When true, region loaders fsync on close. */
+	private static bool $regionFsyncEnabled = false;
+
 	private function __construct(){
 		//NOOP
+	}
+
+	public static function setFsyncEnabled(bool $enabled) : void{
+		self::$fsyncEnabled = $enabled;
+	}
+
+	public static function isFsyncEnabled() : bool{
+		return self::$fsyncEnabled;
+	}
+
+	public static function setRegionFsyncEnabled(bool $enabled) : void{
+		self::$regionFsyncEnabled = $enabled;
+	}
+
+	public static function isRegionFsyncEnabled() : bool{
+		return self::$regionFsyncEnabled;
 	}
 
 	public static function recursiveUnlink(string $dir) : void{
@@ -252,10 +276,15 @@ final class Filesystem{
 		}while(is_dir($temporaryFileName));
 
 		try{
-			ErrorToExceptionHandler::trap(fn() => $context !== null ?
-				file_put_contents($temporaryFileName, $contents, $flags, $context) :
-				file_put_contents($temporaryFileName, $contents, $flags)
-			);
+			if($context !== null || ($flags & ~LOCK_EX) !== 0){
+				// Context / exotic flags: fall back to file_put_contents (still temp+rename).
+				ErrorToExceptionHandler::trap(fn() => $context !== null ?
+					file_put_contents($temporaryFileName, $contents, $flags, $context) :
+					file_put_contents($temporaryFileName, $contents, $flags)
+				);
+			}else{
+				self::writeFileDurable($temporaryFileName, $contents, ($flags & LOCK_EX) !== 0);
+			}
 		}catch(\ErrorException $filePutContentsException){
 			$context !== null ?
 				@unlink($temporaryFileName, $context) :
@@ -290,6 +319,37 @@ final class Filesystem{
 				throw new \RuntimeException("Failed to move temporary file contents into target file: " . $copyException->getMessage(), 0, $copyException);
 			}
 			@unlink($temporaryFileName);
+		}
+	}
+
+	/**
+	 * Writes $contents to $path with fflush and optional fsync.
+	 *
+	 * @throws \ErrorException
+	 */
+	private static function writeFileDurable(string $path, string $contents, bool $exclusiveLock) : void{
+		$fp = ErrorToExceptionHandler::trapAndRemoveFalse(fn() => fopen($path, "wb"));
+		try{
+			if($exclusiveLock){
+				ErrorToExceptionHandler::trapAndRemoveFalse(fn() => flock($fp, LOCK_EX));
+			}
+			$written = 0;
+			$length = strlen($contents);
+			while($written < $length){
+				$n = ErrorToExceptionHandler::trapAndRemoveFalse(fn() => fwrite($fp, $written === 0 ? $contents : substr($contents, $written)));
+				if($n === 0){
+					throw new \ErrorException("fwrite() wrote 0 bytes to $path");
+				}
+				$written += $n;
+			}
+			ErrorToExceptionHandler::trapAndRemoveFalse(fn() => fflush($fp));
+			if(self::$fsyncEnabled){
+				ErrorToExceptionHandler::trapAndRemoveFalse(fn() => fsync($fp));
+			}
+		}finally{
+			if(is_resource($fp)){
+				fclose($fp);
+			}
 		}
 	}
 

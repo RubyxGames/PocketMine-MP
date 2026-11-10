@@ -58,6 +58,22 @@ trait HorizontalConnectableTrait{
 	}
 
 	/**
+	 * Recompute connections from neighbours and write the result back.
+	 *
+	 * Needed after chunk load on Bedrock 1.26.50+: fence/pane connection properties were added with
+	 * default 0, so worlds saved without them render as isolated posts until a neighbour update.
+	 *
+	 * @param bool $updateNeighbours whether to notify neighbouring blocks (false during bulk chunk refresh)
+	 */
+	public function refreshConnections(bool $updateNeighbours = false) : bool{
+		if(!$this->recalculateConnections()){
+			return false;
+		}
+		$this->position->getWorld()->setBlock($this->position, $this, $updateNeighbours);
+		return true;
+	}
+
+	/**
 	 * Implement this to (re)compute connections from the block's neighbours. Must return whether anything changed.
 	 */
 	abstract protected function recalculateConnections() : bool;

@@ -1,0 +1,169 @@
+<?php
+
+namespace pocketmine\world\worldedit\utils;
+
+use pocketmine\world\worldedit\math\BaseVector;
+use pocketmine\world\worldedit\math\BlockOffsetVector;
+use pocketmine\world\worldedit\math\BlockVector;
+use pocketmine\world\worldedit\math\OffGridBlockVector;
+use pocketmine\world\worldedit\session\SessionIdentifier;
+use pocketmine\nbt\LittleEndianNbtSerializer;
+use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\nbt\TreeRoot;
+use pocketmine\utils\BinaryStream;
+
+class ExtendedBinaryStream extends BinaryStream
+{
+	/**
+	 * @param string $str
+	 */
+	public function putString(string $str): void
+	{
+		$this->putInt(strlen($str));
+		$this->put($str);
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getString(): string
+	{
+		return $this->get($this->getInt());
+	}
+
+	public function putBlockVector(BaseVector $vector): void
+	{
+		$this->putInt($vector->x);
+		$this->putInt($vector->y);
+		$this->putInt($vector->z);
+	}
+
+	public function getBlockVector(): BlockVector
+	{
+		return new BlockVector($this->getInt(), $this->getInt(), $this->getInt());
+	}
+
+	public function getOffGridBlockVector(): OffGridBlockVector
+	{
+		return new OffGridBlockVector($this->getInt(), $this->getInt(), $this->getInt());
+	}
+
+	public function getOffsetVector(): BlockOffsetVector
+	{
+		return new BlockOffsetVector($this->getInt(), $this->getInt(), $this->getInt());
+	}
+
+	/**
+	 * @param CompoundTag $compound
+	 */
+	public function putCompound(CompoundTag $compound): void
+	{
+		$this->putString((new LittleEndianNbtSerializer())->write(new TreeRoot($compound)));
+	}
+
+	/**
+	 * @return CompoundTag
+	 */
+	public function getCompound(): CompoundTag
+	{
+		return (new LittleEndianNbtSerializer())->read($this->getString())->mustGetCompoundTag();
+	}
+
+	/**
+	 * @param CompoundTag[] $compounds
+	 */
+	public function putCompounds(array $compounds): void
+	{
+		$this->putInt(count($compounds));
+		foreach ($compounds as $hash => $compound) {
+			$this->putLong($hash);
+			$this->putCompound($compound);
+		}
+	}
+
+	/**
+	 * @return CompoundTag[]
+	 */
+	public function getCompounds(): array
+	{
+		$compounds = [];
+		$count = $this->getInt();
+		for ($i = 0; $i < $count; $i++) {
+			$compounds[$this->getLong()] = $this->getCompound();
+		}
+		return $compounds;
+	}
+
+	/**
+	 * Unkeyed list of compounds (e.g. entities — multiple may share a cell).
+	 *
+	 * @param CompoundTag[] $compounds
+	 * @phpstan-param list<CompoundTag> $compounds
+	 */
+	public function putCompoundList(array $compounds): void
+	{
+		$this->putInt(count($compounds));
+		foreach ($compounds as $compound) {
+			$this->putCompound($compound);
+		}
+	}
+
+	/**
+	 * @return CompoundTag[]
+	 * @phpstan-return list<CompoundTag>
+	 */
+	public function getCompoundList(): array
+	{
+		$compounds = [];
+		$count = $this->getInt();
+		for ($i = 0; $i < $count; $i++) {
+			$compounds[] = $this->getCompound();
+		}
+		return $compounds;
+	}
+
+	/**
+	 * @param SessionIdentifier $id
+	 */
+	public function putSessionIdentifier(SessionIdentifier $id): void
+	{
+		$this->putString($id->fastSerialize());
+	}
+
+	/**
+	 * @return SessionIdentifier
+	 */
+	public function getSessionIdentifier(): SessionIdentifier
+	{
+		return SessionIdentifier::fastDeserialize($this->getString());
+	}
+
+	/**
+	 * @param string[] $array
+	 * @return string
+	 */
+	public static function fastArraySerialize(array $array): string
+	{
+		$stream = new ExtendedBinaryStream();
+		$stream->putInt(count($array));
+		foreach ($array as $str) {
+			$stream->putString($str);
+		}
+		return $stream->getBuffer();
+	}
+
+	/**
+	 * @param string $str
+	 * @return string[] $array
+	 */
+	public static function fastArrayDeserialize(string $str): array
+	{
+		$array = [];
+		$stream = new ExtendedBinaryStream($str);
+		$count = $stream->getInt();
+		for ($i = 0; $i < $count; $i++) {
+			$array[] = $stream->getString();
+		}
+		return $array;
+	}
+}

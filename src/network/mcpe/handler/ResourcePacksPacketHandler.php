@@ -55,13 +55,13 @@ use function substr;
  * packs to the client.
  */
 class ResourcePacksPacketHandler extends PacketHandler{
-	private const PACK_CHUNK_SIZE = 256 * 1024; //256KB
+	private const DEFAULT_PACK_CHUNK_SIZE = 256 * 1024; //256KB
 
 	/**
 	 * Larger values allow downloading more chunks at the same time, increasing download speed, but the client may choke
 	 * and cause the download speed to drop (due to ACKs taking too long to arrive).
 	 */
-	private const MAX_CONCURRENT_CHUNK_REQUESTS = 1;
+	private const DEFAULT_MAX_CONCURRENT_CHUNK_REQUESTS = 1;
 
 	/**
 	 * All data/resource_packs/chemistry* packs need to be listed here to get chemistry blocks to render
@@ -102,13 +102,26 @@ class ResourcePacksPacketHandler extends PacketHandler{
 	 * @phpstan-param array<string, string> $encryptionKeys
 	 * @phpstan-param \Closure() : void     $completionCallback
 	 */
+	/**
+	 * @param string[] $cdnUrls pack UUID => CDN URL
+	 * @phpstan-param array<string, string> $cdnUrls
+	 */
 	public function __construct(
-		private NetworkSession $session,
+		protected NetworkSession $session,
 		private array $resourcePackStack,
 		private array $encryptionKeys,
 		private bool $mustAccept,
-		private \Closure $completionCallback
+		private \Closure $completionCallback,
+		private int $packChunkSize = self::DEFAULT_PACK_CHUNK_SIZE,
+		private int $maxConcurrentChunkRequests = self::DEFAULT_MAX_CONCURRENT_CHUNK_REQUESTS,
+		private array $cdnUrls = []
 	){
+		if($this->packChunkSize < 1){
+			throw new \InvalidArgumentException("packChunkSize must be positive");
+		}
+		if($this->maxConcurrentChunkRequests < 1){
+			throw new \InvalidArgumentException("maxConcurrentChunkRequests must be positive");
+		}
 		$this->requestQueue = new \SplQueue();
 		foreach($resourcePackStack as $pack){
 			$this->resourcePacksById[$pack->getPackId()] = $pack;
@@ -120,30 +133,41 @@ class ResourcePacksPacketHandler extends PacketHandler{
 	}
 
 	public function setUp() : void{
-		$resourcePackEntries = array_map(function(ResourcePack $pack) : ResourcePackInfoEntry{
-			//TODO: more stuff
+		$cdnByUuid = [];
+		foreach($this->cdnUrls as $id => $url){
+			$cdnByUuid[strtolower($id)] = $url;
+		}
+		$resourcePackEntries = array_map(function(ResourcePack $pack) use ($cdnByUuid) : ResourcePackInfoEntry{
+			$packId = $pack->getPackId();
+			$cdn = $cdnByUuid[strtolower($packId)] ?? "";
 
 			return new ResourcePackInfoEntry(
-				Uuid::fromString($pack->getPackId()),
+				Uuid::fromString($packId),
 				$pack->getPackVersion(),
 				$pack->getPackSize(),
-				$this->encryptionKeys[$pack->getPackId()] ?? "",
+				$this->encryptionKeys[$packId] ?? "",
 				"",
-				$pack->getPackId(),
-				false
+				$packId,
+				false,
+				false,
+				false,
+				$cdn
 			);
 		}, $this->resourcePackStack);
 		//TODO: support forcing server packs
 		$this->session->sendDataPacket(ResourcePacksInfoPacket::create(
 			resourcePackEntries: $resourcePackEntries,
+			behaviorPackEntries: [],
 			mustAccept: $this->mustAccept,
 			hasAddons: false,
 			hasScripts: false,
+			forceServerPacks: false,
+			cdnUrls: $cdnByUuid,
 			worldTemplateId: Uuid::fromString(Uuid::NIL),
 			worldTemplateVersion: "",
 			forceDisableVibrantVisuals: true,
 		));
-		$this->session->getLogger()->debug("Waiting for client to accept resource packs");
+		$this->session->getLogger()->debug("Waiting for client to accept resource packs" . (count($cdnByUuid) > 0 ? " (" . count($cdnByUuid) . " CDN URLs)" : ""));
 	}
 
 	private function disconnectWithError(string $error) : void{
@@ -194,8 +218,8 @@ class ResourcePacksPacketHandler extends PacketHandler{
 
 					$this->session->sendDataPacket(ResourcePackDataInfoPacket::create(
 						$pack->getPackId(),
-						self::PACK_CHUNK_SIZE,
-						(int) ceil($pack->getPackSize() / self::PACK_CHUNK_SIZE),
+						$this->packChunkSize,
+						(int) ceil($pack->getPackSize() / $this->packChunkSize),
 						$pack->getPackSize(),
 						$pack->getSha256(),
 						false,
@@ -223,7 +247,7 @@ class ResourcePacksPacketHandler extends PacketHandler{
 				//we don't force here, because it doesn't have user-facing effects
 				//but it does have an annoying side-effect when true: it makes
 				//the client remove its own non-server-supplied resource packs.
-				$this->session->sendDataPacket(ResourcePackStackPacket::create($stack, false, ProtocolInfo::MINECRAFT_VERSION_NETWORK, new Experiments([], false), false));
+				$this->session->sendDataPacket(ResourcePackStackPacket::create($stack, [], false, ProtocolInfo::MINECRAFT_VERSION_NETWORK, new Experiments([], false), false));
 				$this->session->getLogger()->debug("Applying resource pack stack");
 				break;
 			case ResourcePackClientResponseStatus::COMPLETED:
@@ -254,7 +278,7 @@ class ResourcePacksPacketHandler extends PacketHandler{
 			return false;
 		}
 
-		$offset = $packet->chunkIndex * self::PACK_CHUNK_SIZE;
+		$offset = $packet->chunkIndex * $this->packChunkSize;
 		if($offset < 0 || $offset >= $pack->getPackSize()){
 			$this->disconnectWithError("Invalid out-of-bounds request for chunk $packet->chunkIndex of $packet->packId: offset $offset, file size " . $pack->getPackSize());
 			return false;
@@ -273,7 +297,7 @@ class ResourcePacksPacketHandler extends PacketHandler{
 	}
 
 	private function processChunkRequestQueue() : void{
-		if($this->activeRequests >= self::MAX_CONCURRENT_CHUNK_REQUESTS || $this->requestQueue->isEmpty()){
+		if($this->activeRequests >= $this->maxConcurrentChunkRequests || $this->requestQueue->isEmpty()){
 			return;
 		}
 		/**
@@ -283,8 +307,8 @@ class ResourcePacksPacketHandler extends PacketHandler{
 		[$pack, $chunkIndex] = $this->requestQueue->dequeue();
 
 		$packId = $pack->getPackId();
-		$offset = $chunkIndex * self::PACK_CHUNK_SIZE;
-		$chunkData = $pack->getPackChunk($offset, self::PACK_CHUNK_SIZE);
+		$offset = $chunkIndex * $this->packChunkSize;
+		$chunkData = $pack->getPackChunk($offset, $this->packChunkSize);
 		$this->activeRequests++;
 		$this->session
 			->sendDataPacketWithReceipt(ResourcePackChunkDataPacket::create($packId, $chunkIndex, $offset, $chunkData))

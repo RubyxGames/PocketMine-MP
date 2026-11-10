@@ -116,10 +116,41 @@ abstract class PluginBase implements Plugin, CommandExecutor{
 		if($this->isEnabled !== $enabled){
 			$this->isEnabled = $enabled;
 			if($this->isEnabled){
+				$this->ensureDataVersion();
 				$this->onEnable();
 			}else{
 				$this->onDisable();
 			}
+		}
+	}
+
+	/**
+	 * Preferred on-disk data schema version. 0 disables PluginDataVersion.
+	 * Defaults to plugin.yml `data-version` when set.
+	 */
+	protected function getPreferredDataVersion() : int{
+		return $this->description->getDataVersion();
+	}
+
+	/**
+	 * Called when stored data-version is older than getPreferredDataVersion().
+	 */
+	protected function migrateData(int $from, int $to) : void{
+		//NOOP — override in plugins that opt in
+	}
+
+	private function ensureDataVersion() : void{
+		$codeVersion = $this->getPreferredDataVersion();
+		if($codeVersion <= 0){
+			return;
+		}
+		try{
+			PluginDataVersion::ensure($this, $codeVersion, function(int $from, int $to) : void{
+				$this->migrateData($from, $to);
+			});
+		}catch(\Throwable $e){
+			$this->logger->critical("Data version check failed: " . $e->getMessage());
+			throw $e;
 		}
 	}
 
