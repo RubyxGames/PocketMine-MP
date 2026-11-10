@@ -23,15 +23,25 @@ declare(strict_types=1);
 
 namespace pocketmine\network\mcpe\cache;
 
+use pmmp\encoding\BE;
 use pocketmine\crafting\CraftingManager;
 use pocketmine\crafting\FurnaceType;
+use pocketmine\crafting\MetaWildcardRecipeIngredient;
 use pocketmine\crafting\ShapedRecipe;
 use pocketmine\crafting\ShapelessRecipe;
 use pocketmine\crafting\ShapelessRecipeType;
+use pocketmine\crafting\TagWildcardRecipeIngredient;
+use pocketmine\data\bedrock\item\ItemTypeSerializeException;
+use pocketmine\data\bedrock\ItemTagDowngrader;
+use pocketmine\data\bedrock\ItemTagToIdMap;
 use pocketmine\network\mcpe\convert\TypeConverter;
 use pocketmine\network\mcpe\protocol\CraftingDataPacket;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\types\recipe\CraftingRecipeBlockName;
+use pocketmine\network\mcpe\protocol\types\recipe\FurnaceRecipe as ProtocolFurnaceRecipe;
 use pocketmine\network\mcpe\protocol\types\recipe\FurnaceRecipeBlockName;
+use pocketmine\network\mcpe\protocol\types\recipe\IntIdMetaItemDescriptor;
+use pocketmine\network\mcpe\protocol\types\recipe\ItemDescriptor;
 use pocketmine\network\mcpe\protocol\types\recipe\PotionContainerChangeRecipe as ProtocolPotionContainerChangeRecipe;
 use pocketmine\network\mcpe\protocol\types\recipe\PotionTypeRecipe as ProtocolPotionTypeRecipe;
 use pocketmine\network\mcpe\protocol\types\recipe\RecipeUnlockingContext;
@@ -41,13 +51,13 @@ use pocketmine\network\mcpe\protocol\types\recipe\ShapelessRecipe as ProtocolSha
 use pocketmine\network\mcpe\protocol\types\recipe\StringIdMetaItemDescriptor;
 use pocketmine\timings\Timings;
 use pocketmine\utils\AssumptionFailedError;
-use pocketmine\utils\SingletonTrait;
+use pocketmine\utils\ProtocolSingletonTrait;
 use Ramsey\Uuid\Uuid;
 use function array_map;
 use function spl_object_id;
 
 final class CraftingDataCache{
-	use SingletonTrait;
+	use ProtocolSingletonTrait;
 
 	/**
 	 * @var CraftingDataPacket[]
@@ -82,12 +92,18 @@ final class CraftingDataCache{
 		Timings::$craftingDataCacheRebuild->startTiming();
 
 		$nullUUID = Uuid::fromString(Uuid::NIL);
-		$converter = TypeConverter::getInstance();
+		$converter = TypeConverter::getInstance($this->protocolId);
+		$itemTagDowngrader = ItemTagDowngrader::getInstance($this->protocolId);
+		$protocolId = $this->getProtocolId();
+		$makeRecipeId = static fn(int $recipeNetId) : string => $protocolId >= ProtocolInfo::PROTOCOL_1_26_40 ?
+			Uuid::uuid4()->toString() :
+			BE::packUnsignedInt($recipeNetId); //TODO: this should probably be changed to something human-readable
 
 		$noUnlockingRequirement = new RecipeUnlockingRequirement(RecipeUnlockingContext::ALWAYS_UNLOCKED, null);
 		$recipeNetId = self::RECIPE_ID_OFFSET;
 		$shapelessRecipes = [];
 		$shapedRecipes = [];
+		$furnaceRecipes = [];
 
 		foreach($manager->getCraftingRecipeIndex() as $index => $recipe){
 			//the client doesn't like recipes with an ID of 0, so we need to offset them
@@ -99,37 +115,48 @@ final class CraftingDataCache{
 					ShapelessRecipeType::CARTOGRAPHY => CraftingRecipeBlockName::CARTOGRAPHY_TABLE,
 					ShapelessRecipeType::SMITHING => CraftingRecipeBlockName::SMITHING_TABLE,
 				};
-				$shapelessRecipes[] = new ProtocolShapelessRecipe(
-					Uuid::uuid4()->toString(),
-					array_map($converter->coreRecipeIngredientToNet(...), $recipe->getIngredientList()),
-					array_map($converter->coreItemStackToNet(...), $recipe->getResults()),
-					$nullUUID,
-					$typeTag,
-					50,
-					$noUnlockingRequirement,
-					$recipeNetId
-				);
-			}elseif($recipe instanceof ShapedRecipe){
-				$inputs = [];
-
-				for($row = 0, $height = $recipe->getHeight(); $row < $height; ++$row){
-					$rowInputs = [];
-					for($column = 0, $width = $recipe->getWidth(); $column < $width; ++$column){
-						$rowInputs[] = $converter->coreRecipeIngredientToNet($recipe->getIngredient($column, $row));
+				foreach($itemTagDowngrader->downgradeShapelessRecipe($recipe) as $r){
+					try{
+						$shapelessRecipes[] = new ProtocolShapelessRecipe(
+							$makeRecipeId($recipeNetId),
+							array_map($converter->coreRecipeIngredientToNet(...), $r->getIngredientList()),
+							array_map($converter->coreItemStackToNet(...), $r->getResults()),
+							$nullUUID,
+							$typeTag,
+							50,
+							$noUnlockingRequirement,
+							$recipeNetId
+						);
+					}catch(\InvalidArgumentException|ItemTypeSerializeException){
+						continue;
 					}
-					$inputs[] = $rowInputs;
 				}
-				$shapedRecipes[] = $r = new ProtocolShapedRecipe(
-					Uuid::uuid4()->toString(),
-					$inputs,
-					array_map($converter->coreItemStackToNet(...), $recipe->getResults()),
-					$nullUUID,
-					CraftingRecipeBlockName::CRAFTING_TABLE,
-					50,
-					true,
-					$noUnlockingRequirement,
-					$recipeNetId,
-				);
+			}elseif($recipe instanceof ShapedRecipe){
+				foreach($itemTagDowngrader->downgradeShapedRecipe($recipe) as $r){
+					try{
+						$inputs = [];
+						for($row = 0, $height = $r->getHeight(); $row < $height; ++$row){
+							$rowInputs = [];
+							for($column = 0, $width = $r->getWidth(); $column < $width; ++$column){
+								$rowInputs[] = $converter->coreRecipeIngredientToNet($r->getIngredient($column, $row));
+							}
+							$inputs[] = $rowInputs;
+						}
+						$shapedRecipes[] = new ProtocolShapedRecipe(
+							$makeRecipeId($recipeNetId),
+							$inputs,
+							array_map($converter->coreItemStackToNet(...), $r->getResults()),
+							$nullUUID,
+							CraftingRecipeBlockName::CRAFTING_TABLE,
+							50,
+							true,
+							$noUnlockingRequirement,
+							$recipeNetId,
+						);
+					}catch(\InvalidArgumentException|ItemTypeSerializeException){
+						continue;
+					}
+				}
 			}else{
 				//TODO: probably special recipe types
 			}
@@ -144,52 +171,84 @@ final class CraftingDataCache{
 				FurnaceType::SOUL_CAMPFIRE => FurnaceRecipeBlockName::SOUL_CAMPFIRE
 			};
 			foreach($manager->getFurnaceRecipeManager($furnaceType)->getAll() as $recipe){
-				$recipeNetId++;
-				$shapelessRecipes[] = new ProtocolShapelessRecipe(
-					Uuid::uuid4()->toString(),
-					[$converter->coreRecipeIngredientToNet($recipe->getInput())],
-					[$converter->coreItemStackToNet($recipe->getResult())],
-					$nullUUID,
-					$typeTag,
-					50,
-					$noUnlockingRequirement,
-					$recipeNetId //not used, but we need to fill them with something unique regardless
-				);
+				try{
+					if($protocolId >= ProtocolInfo::PROTOCOL_1_26_20){
+						$recipeNetId++;
+						$shapelessRecipes[] = new ProtocolShapelessRecipe(
+							$makeRecipeId($recipeNetId),
+							[$converter->coreRecipeIngredientToNet($recipe->getInput())],
+							[$converter->coreItemStackToNet($recipe->getResult())],
+							$nullUUID,
+							$typeTag,
+							50,
+							$noUnlockingRequirement,
+							$recipeNetId //not used, but we need to fill them with something unique regardless
+						);
+					}else{
+						$input = $recipe->getInput();
+
+						if($input instanceof TagWildcardRecipeIngredient){
+							foreach(ItemTagToIdMap::getInstance($protocolId)->getIdsForTag($input->getTagName()) as $itemId){
+								[$inputId, $inputMeta] = self::descriptorToIdMeta($converter, $converter->coreRecipeIngredientToNet(new MetaWildcardRecipeIngredient($itemId))->getDescriptor());
+								$furnaceRecipes[] = new ProtocolFurnaceRecipe(
+									CraftingDataPacket::ENTRY_FURNACE_DATA,
+									$inputId,
+									$inputMeta,
+									$converter->coreItemStackToNet($recipe->getResult()),
+									$typeTag
+								);
+							}
+						}else{
+							[$inputId, $inputMeta] = self::descriptorToIdMeta($converter, $converter->coreRecipeIngredientToNet($input)->getDescriptor());
+							$furnaceRecipes[] = new ProtocolFurnaceRecipe(
+								CraftingDataPacket::ENTRY_FURNACE_DATA,
+								$inputId,
+								$inputMeta,
+								$converter->coreItemStackToNet($recipe->getResult()),
+								$typeTag
+							);
+						}
+					}
+				}catch(\InvalidArgumentException|ItemTypeSerializeException){
+					continue;
+				}
 			}
 		}
 
 		$potionTypeRecipes = [];
 		$itemTypeDictionary = $converter->getItemTypeDictionary();
 		foreach($manager->getPotionTypeRecipes() as $recipe){
-			$input = $converter->coreRecipeIngredientToNet($recipe->getInput())->getDescriptor();
-			$ingredient = $converter->coreRecipeIngredientToNet($recipe->getIngredient())->getDescriptor();
-			if(!$input instanceof StringIdMetaItemDescriptor || !$ingredient instanceof StringIdMetaItemDescriptor){
-				throw new AssumptionFailedError();
+			try{
+				[$inputId, $inputMeta] = self::descriptorToIdMeta($converter, $converter->coreRecipeIngredientToNet($recipe->getInput())->getDescriptor());
+				[$ingredientId, $ingredientMeta] = self::descriptorToIdMeta($converter, $converter->coreRecipeIngredientToNet($recipe->getIngredient())->getDescriptor());
+				$output = $converter->coreItemStackToNet($recipe->getOutput());
+				$potionTypeRecipes[] = new ProtocolPotionTypeRecipe(
+					$inputId,
+					$inputMeta,
+					$ingredientId,
+					$ingredientMeta,
+					$output->getId(),
+					$output->getMeta()
+				);
+			}catch(\InvalidArgumentException|ItemTypeSerializeException){
+				continue;
 			}
-			$output = $converter->coreItemStackToNet($recipe->getOutput());
-			$potionTypeRecipes[] = new ProtocolPotionTypeRecipe(
-				$itemTypeDictionary->fromStringId($input->getId()),
-				$input->getMeta(),
-				$itemTypeDictionary->fromStringId($ingredient->getId()),
-				$ingredient->getMeta(),
-				$output->getId(),
-				$output->getMeta()
-			);
 		}
 
 		$potionContainerChangeRecipes = [];
 		foreach($manager->getPotionContainerChangeRecipes() as $recipe){
-			$input = $itemTypeDictionary->fromStringId($recipe->getInputItemId());
-			$ingredient = $converter->coreRecipeIngredientToNet($recipe->getIngredient())->getDescriptor();
-			if(!$ingredient instanceof StringIdMetaItemDescriptor){
-				throw new AssumptionFailedError();
+			try{
+				$input = $itemTypeDictionary->fromStringId($recipe->getInputItemId());
+				[$ingredientId, ] = self::descriptorToIdMeta($converter, $converter->coreRecipeIngredientToNet($recipe->getIngredient())->getDescriptor());
+				$output = $itemTypeDictionary->fromStringId($recipe->getOutputItemId());
+				$potionContainerChangeRecipes[] = new ProtocolPotionContainerChangeRecipe(
+					$input,
+					$ingredientId,
+					$output
+				);
+			}catch(\InvalidArgumentException|ItemTypeSerializeException){
+				continue;
 			}
-			$output = $itemTypeDictionary->fromStringId($recipe->getOutputItemId());
-			$potionContainerChangeRecipes[] = new ProtocolPotionContainerChangeRecipe(
-				$input,
-				$itemTypeDictionary->fromStringId($ingredient->getId()),
-				$output
-			);
 		}
 
 		Timings::$craftingDataCacheRebuild->stopTiming();
@@ -205,7 +264,23 @@ final class CraftingDataCache{
 			$potionTypeRecipes,
 			$potionContainerChangeRecipes,
 			[],
-			true
+			true,
+			$furnaceRecipes
 		);
+	}
+
+	/**
+	 * Recipe ingredients use int IDs before 1.26.40 and string IDs since, but potion and furnace recipes always use int IDs
+	 *
+	 * @phpstan-return array{int, int}
+	 */
+	private static function descriptorToIdMeta(TypeConverter $converter, ?ItemDescriptor $descriptor) : array{
+		if($descriptor instanceof IntIdMetaItemDescriptor){
+			return [$descriptor->getId(), $descriptor->getMeta()];
+		}
+		if($descriptor instanceof StringIdMetaItemDescriptor){
+			return [$converter->getItemTypeDictionary()->fromStringId($descriptor->getId()), $descriptor->getMeta()];
+		}
+		throw new AssumptionFailedError();
 	}
 }

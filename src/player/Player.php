@@ -29,6 +29,7 @@ use pocketmine\block\BlockTypeTags;
 use pocketmine\block\RespawnAnchor;
 use pocketmine\block\UnknownBlock;
 use pocketmine\block\VanillaBlocks;
+use pocketmine\color\Color;
 use pocketmine\command\CommandSender;
 use pocketmine\crafting\CraftingGrid;
 use pocketmine\data\java\GameModeIdMap;
@@ -84,6 +85,9 @@ use pocketmine\event\player\PlayerToggleSprintEvent;
 use pocketmine\event\player\PlayerToggleSwimEvent;
 use pocketmine\event\player\PlayerTransferEvent;
 use pocketmine\event\player\PlayerViewDistanceChangeEvent;
+use pocketmine\form\ddui\DduiForm;
+use pocketmine\form\ddui\DduiMessageBoxForm;
+use pocketmine\form\ddui\DduiSupport;
 use pocketmine\form\Form;
 use pocketmine\form\FormValidationException;
 use pocketmine\inventory\CallbackInventoryListener;
@@ -107,11 +111,25 @@ use pocketmine\item\Releasable;
 use pocketmine\lang\KnownTranslationFactory;
 use pocketmine\lang\Language;
 use pocketmine\lang\Translatable;
+use pocketmine\math\Vector2;
 use pocketmine\math\Vector3;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\nbt\tag\IntTag;
 use pocketmine\network\mcpe\NetworkSession;
 use pocketmine\network\mcpe\protocol\AnimatePacket;
+use pocketmine\network\mcpe\protocol\CameraShakePacket;
+use pocketmine\network\mcpe\protocol\CorrectPlayerMovePredictionPacket;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistActionType;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistCategory;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistPreset;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistPresetsPacketOperation;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistTargetMode;
+use pocketmine\network\mcpe\protocol\types\camera\CameraFovInstruction;
+use pocketmine\network\mcpe\protocol\types\camera\CameraPreset;
+use pocketmine\network\mcpe\protocol\types\camera\CameraSetInstruction;
+use pocketmine\network\mcpe\protocol\types\camera\CameraSplineDefinition;
+use pocketmine\network\mcpe\protocol\types\camera\CameraSplineInstruction;
+use pocketmine\network\mcpe\protocol\types\camera\CameraTargetInstruction;
 use pocketmine\network\mcpe\protocol\MovePlayerPacket;
 use pocketmine\network\mcpe\protocol\SetActorMotionPacket;
 use pocketmine\network\mcpe\protocol\types\BlockPosition;
@@ -637,7 +655,24 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 
 	public function setViewDistance(int $distance) : void{
 		$newViewDistance = $this->server->getAllowedViewDistance($distance);
+		$qos = $this->server->getAdaptiveQosManager();
+		if($qos !== null && $qos->isEnabled()){
+			$newViewDistance = $qos->filterClientViewDistance($this, $newViewDistance);
+		}
+		$this->applyViewDistanceInternal($newViewDistance, $distance);
+	}
 
+	/**
+	 * Applies a QoS-limited view distance without treating it as a new client request.
+	 *
+	 * @internal
+	 */
+	public function applyQosViewDistance(int $distance) : void{
+		$newViewDistance = $this->server->getAllowedViewDistance($distance);
+		$this->applyViewDistanceInternal($newViewDistance, $distance);
+	}
+
+	private function applyViewDistanceInternal(int $newViewDistance, int $requestedForLog) : void{
 		if($newViewDistance !== $this->viewDistance){
 			$ev = new PlayerViewDistanceChangeEvent($this, $this->viewDistance, $newViewDistance);
 			$ev->call();
@@ -651,7 +686,7 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 
 		$this->getNetworkSession()->syncViewAreaRadius($this->viewDistance);
 
-		$this->logger->debug("Setting view distance to " . $this->viewDistance . " (requested " . $distance . ")");
+		$this->logger->debug("Setting view distance to " . $this->viewDistance . " (requested " . $requestedForLog . ")");
 	}
 
 	public function isOnline() : bool{
@@ -1392,8 +1427,8 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 
 		$revert = false;
 
-		if($distanceSquared > 225){ //15 blocks
-			//TODO: this is probably too big if we process every movement
+		$maxMoveSq = MovementGuard::isEnabled() ? MovementGuard::getMaxBlocksPerMoveSquared() : 225.0;
+		if($distanceSquared > $maxMoveSq){
 			/* !!! BEWARE YE WHO ENTER HERE !!!
 			 *
 			 * This is NOT an anti-cheat check. It is a safety check.
@@ -1458,10 +1493,21 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 				}
 			}
 
+			$horizontalDistanceTravelled = sqrt((($from->x - $to->x) ** 2) + (($from->z - $to->z) ** 2));
+			if(
+				MovementGuard::isEnabled()
+				&& !$this->isCreative(true)
+				&& !$this->isSpectator()
+				&& ($horizontalDistanceTravelled ** 2) > MovementGuard::getMaxBlocksPerTickSquared()
+			){
+				$this->logger->debug("Exceeded per-tick horizontal movement (" . $horizontalDistanceTravelled . "), reverting");
+				$this->revertMovement($from);
+				return;
+			}
+
 			$this->lastLocation = $to;
 			$this->broadcastMovement();
 
-			$horizontalDistanceTravelled = sqrt((($from->x - $to->x) ** 2) + (($from->z - $to->z) ** 2));
 			if($horizontalDistanceTravelled > 0){
 				//TODO: check for swimming
 				if($this->isSprinting()){
@@ -1479,12 +1525,38 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 		if($exceededRateLimit){ //client and server positions will be out of sync if this happens
 			$this->logger->debug("Exceeded movement rate limit, forcing to last accepted position");
 			$this->sendPosition($this->location, $this->location->getYaw(), $this->location->getPitch(), MovePlayerPacket::MODE_RESET);
+			$this->sendMovePredictionCorrection($this->location);
 		}
 	}
 
 	protected function revertMovement(Location $from) : void{
 		$this->setPosition($from);
 		$this->sendPosition($from, $from->yaw, $from->pitch, MovePlayerPacket::MODE_RESET);
+		$this->sendMovePredictionCorrection($from);
+	}
+
+	/**
+	 * Sends CorrectPlayerMovePredictionPacket so Bedrock clients rubberband with prediction awareness.
+	 * Not a full server-authoritative physics loop.
+	 */
+	protected function sendMovePredictionCorrection(Location $pos) : void{
+		if(!MovementGuard::shouldSendPredictionCorrection()){
+			return;
+		}
+		if(!$this->isConnected()){
+			return;
+		}
+		// Real motion (not zero) so Bedrock rubberband keeps velocity; still not a physics sim.
+		// PREDICTION_TYPE_VEHICLE reserved until a first-class ride API exists.
+		$this->getNetworkSession()->sendDataPacket(CorrectPlayerMovePredictionPacket::create(
+			$pos->asVector3(),
+			$this->getMotion(),
+			$this->onGround || $this->isFlying(),
+			$this->server->getTick(),
+			CorrectPlayerMovePredictionPacket::PREDICTION_TYPE_PLAYER,
+			new Vector2(0.0, 0.0),
+			null
+		));
 	}
 
 	protected function calculateFallDamage(float $fallDistance) : float{
@@ -1629,6 +1701,8 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 					Timings::$playerCommand->startTiming();
 					$this->server->dispatchCommand($this, substr($messagePart, 1));
 					Timings::$playerCommand->stopTiming();
+				}elseif(!$this->server->getAbuseLimitsManager()->allowChat($this)){
+					// dropped by abuse-limits.chat
 				}else{
 					$ev = new PlayerChatEvent($this, $messagePart, $this->server->getBroadcastChannelSubscribers(Server::BROADCAST_CHANNEL_USERS), new StandardChatFormatter());
 					$ev->call();
@@ -2024,7 +2098,9 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 
 		$soundPos = $entity->getPosition()->add(0, $entity->size->getHeight() / 2, 0);
 		if($ev->isCancelled()){
-			$this->getWorld()->addSound($soundPos, new EntityAttackNoDamageSound());
+			if(!$this->isSilent() && !$this->isAdventure()){
+				$this->getWorld()->addSound($soundPos, new EntityAttackNoDamageSound());
+			}
 			return false;
 		}
 		$this->getWorld()->addSound($soundPos, new EntityAttackSound());
@@ -2143,6 +2219,10 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 		}
 		$this->setFlying($fly);
 		return true;
+	}
+
+	public function toggleCrawl(bool $crawl) : bool{
+		return false;
 	}
 
 	public function toggleGlide(bool $glide) : bool{
@@ -2280,15 +2360,175 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 	}
 
 	/**
+	 * Shakes the player's camera (Bedrock CameraShakePacket).
+	 *
+	 * @param int $type CameraShakePacket::TYPE_POSITIONAL or TYPE_ROTATIONAL
+	 */
+	public function shakeCamera(float $intensity, float $duration, int $type = CameraShakePacket::TYPE_ROTATIONAL) : void{
+		$this->getNetworkSession()->onCameraShake($intensity, $duration, $type);
+	}
+
+	/**
+	 * Stops any active camera shake on the client.
+	 */
+	public function stopCameraShake() : void{
+		$this->getNetworkSession()->onStopCameraShake();
+	}
+
+	/**
+	 * Fades the player's camera (default black). Times are in seconds.
+	 */
+	public function fadeCamera(float $fadeInTime, float $stayTime, float $fadeOutTime, ?Color $color = null) : void{
+		$this->getNetworkSession()->onCameraFade($fadeInTime, $stayTime, $fadeOutTime, $color ?? new Color(0, 0, 0));
+	}
+
+	/**
+	 * Clears camera instructions (fade / set) on the client.
+	 */
+	public function clearCamera() : void{
+		$this->getNetworkSession()->onCameraClear();
+	}
+
+	/**
+	 * Sends camera presets to the client (CameraPresetsPacket).
+	 *
+	 * @param CameraPreset ...$presets
+	 */
+	public function sendCameraPresets(CameraPreset ...$presets) : void{
+		$this->getNetworkSession()->onCameraPresets($presets);
+	}
+
+	/**
+	 * Applies a camera set instruction (position/rotation/facing relative to a preset index).
+	 */
+	public function setCamera(CameraSetInstruction $set) : void{
+		$this->getNetworkSession()->onCameraSet($set);
+	}
+
+	/**
+	 * Applies a field-of-view camera instruction.
+	 */
+	public function setCameraFov(CameraFovInstruction $fov) : void{
+		$this->getNetworkSession()->onCameraFov($fov);
+	}
+
+	/**
+	 * Sets or removes a camera target (entity unique id).
+	 */
+	public function setCameraTarget(?CameraTargetInstruction $target, bool $remove = false) : void{
+		$this->getNetworkSession()->onCameraTarget($target, $remove);
+	}
+
+	/**
+	 * Applies a camera spline instruction (keyframe path).
+	 */
+	public function setCameraSpline(CameraSplineInstruction $spline) : void{
+		$this->getNetworkSession()->onCameraSpline($spline);
+	}
+
+	/**
+	 * Registers named camera spline definitions on the client ({@see CameraSplinePacket}).
+	 *
+	 * @param CameraSplineDefinition ...$splines
+	 */
+	public function sendNamedCameraSplines(CameraSplineDefinition ...$splines) : void{
+		$this->getNetworkSession()->onNamedCameraSplines($splines);
+	}
+
+	/**
+	 * Attaches the client camera to an entity (runtime actor unique id).
+	 */
+	public function attachCameraToEntity(int $actorUniqueId) : void{
+		$this->getNetworkSession()->onCameraAttachToEntity($actorUniqueId);
+	}
+
+	/**
+	 * Detaches the client camera from any attached entity.
+	 */
+	public function detachCameraFromEntity() : void{
+		$this->getNetworkSession()->onCameraDetachFromEntity();
+	}
+
+	/**
+	 * Sends aim-assist preset categories to the client.
+	 *
+	 * @param CameraAimAssistCategory[] $categories
+	 * @param CameraAimAssistPreset[]   $presets
+	 */
+	public function sendCameraAimAssistPresets(array $categories, array $presets, int $operation = CameraAimAssistPresetsPacketOperation::SET) : void{
+		$this->getNetworkSession()->onCameraAimAssistPresets($categories, $presets, $operation);
+	}
+
+	/**
+	 * Enables / updates client aim-assist for a preset id.
+	 */
+	public function sendCameraAimAssist(
+		string $presetId,
+		Vector2 $viewAngle,
+		float $distance,
+		CameraAimAssistTargetMode $targetMode,
+		CameraAimAssistActionType $actionType,
+		bool $showDebugRender = false
+	) : void{
+		$this->getNetworkSession()->onCameraAimAssist($presetId, $viewAngle, $distance, $targetMode, $actionType, $showDebugRender);
+	}
+
+	/**
 	 * Sends a Form to the player, or queue to send it if a form is already open.
 	 *
 	 * @throws \InvalidArgumentException
 	 */
 	public function sendForm(Form $form) : void{
+		$this->getNetworkSession()->getDduiSessionManager()->closeAll();
 		$id = $this->formIdCounter++;
 		if($this->getNetworkSession()->onFormSent($id, $form)){
 			$this->forms[$id] = $form;
 		}
+	}
+
+	public function supportsDdui() : bool{
+		return DduiSupport::playerSupports($this);
+	}
+
+	public function supportsDduiScreenClosed() : bool{
+		return DduiSupport::playerSupportsScreenClosed($this);
+	}
+
+	public function supportsDduiDataInstanceId() : bool{
+		return DduiSupport::playerSupportsDataInstanceId($this);
+	}
+
+	public function getDduiProtocolTier() : string{
+		return DduiSupport::protocolTier($this->getNetworkSession()->getProtocolId());
+	}
+
+	public function getDduiThemeAlias() : string{
+		return \pocketmine\form\ddui\DduiThemeRegistry::getDefaultAlias();
+	}
+
+	public function resolveDduiStyleId(?string $themeAlias = null) : string{
+		return \pocketmine\form\ddui\DduiThemeRegistry::resolveStyleId($themeAlias);
+	}
+
+	/**
+	 * Opens a data-driven UI form. When DDUI is unavailable, {@see DduiMessageBoxForm} falls back to {@see ModalForm}; other types are ignored.
+	 */
+	public function sendDduiForm(DduiForm $form) : void{
+		$this->getNetworkSession()->onCloseLegacyForms();
+		if($this->supportsDdui() && $this->getNetworkSession()->getDduiSessionManager()->show($form)){
+			return;
+		}
+		if($form instanceof DduiMessageBoxForm){
+			$this->sendForm($form->toModalFallback());
+		}
+	}
+
+	/**
+	 * @param \pocketmine\network\mcpe\protocol\types\ddui\DataStoreUpdate[] $updates
+	 * @phpstan-param list<\pocketmine\network\mcpe\protocol\types\ddui\DataStoreUpdate> $updates
+	 */
+	public function pushDduiClientUpdates(array $updates) : bool{
+		return $this->getNetworkSession()->getDduiSessionManager()->pushClientUpdates($updates);
 	}
 
 	public function onFormSubmit(int $formId, mixed $responseData) : bool{
@@ -2328,16 +2568,38 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 	 * Transfers a player to another server.
 	 *
 	 * @param string                   $address The IP address or hostname of the destination server
-	 * @param int                      $port    The destination port, defaults to 19132
+	 *                                                    (for NetherNet: signaling host — see docs/nethernet.md)
+	 * @param int                      $port    The destination port, defaults to 19132 (signaling TCP for NetherNet)
 	 * @param Translatable|string|null $message Message to show in the console when closing the player, null will use the default message
+	 * @param bool                     $reloadWorld TransferPacket reload-world flag
+	 * @param \pocketmine\network\mcpe\protocol\types\GatheringJoinInfo|null $gatheringsConfig Optional gatherings metadata
 	 *
 	 * @return bool if transfer was successful.
 	 */
-	public function transfer(string $address, int $port = 19132, Translatable|string|null $message = null) : bool{
-		$ev = new PlayerTransferEvent($this, $address, $port, $message ?? KnownTranslationFactory::pocketmine_disconnect_transfer());
+	public function transfer(
+		string $address,
+		int $port = 19132,
+		Translatable|string|null $message = null,
+		bool $reloadWorld = false,
+		?\pocketmine\network\mcpe\protocol\types\GatheringJoinInfo $gatheringsConfig = null
+	) : bool{
+		$ev = new PlayerTransferEvent(
+			$this,
+			$address,
+			$port,
+			$message ?? KnownTranslationFactory::pocketmine_disconnect_transfer(),
+			$reloadWorld,
+			$gatheringsConfig
+		);
 		$ev->call();
 		if(!$ev->isCancelled()){
-			$this->getNetworkSession()->transfer($ev->getAddress(), $ev->getPort(), $ev->getMessage());
+			$this->getNetworkSession()->transfer(
+				$ev->getAddress(),
+				$ev->getPort(),
+				$ev->getMessage(),
+				$ev->isReloadWorld(),
+				$ev->getGatheringsConfig()
+			);
 			return true;
 		}
 
@@ -2523,7 +2785,7 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 	 * Handles player data saving
 	 */
 	public function save() : void{
-		$this->server->saveOfflinePlayerData($this->username, $this->getSaveData());
+		$this->server->saveOfflinePlayerData($this->username, $this->getSaveData(), $this->xuid !== "" ? $this->xuid : null);
 	}
 
 	protected function onDeath() : void{

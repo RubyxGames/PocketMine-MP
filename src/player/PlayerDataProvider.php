@@ -27,26 +27,28 @@ use pocketmine\nbt\tag\CompoundTag;
 
 /**
  * Handles storage of player data. Implementations must treat player names in a case-insensitive manner.
+ * Optional XUID prefers players/xuid/<xuid>.dat with name-file fallback and dual-write on save.
  */
 interface PlayerDataProvider{
 
 	/**
-	 * Returns whether there are any data associated with the given player name.
+	 * Returns whether there are any data associated with the given player name (or XUID when provided).
 	 */
-	public function hasData(string $name) : bool;
+	public function hasData(string $name, ?string $xuid = null) : bool;
 
 	/**
-	 * Returns the data associated with the given player name, or null if there is no data.
+	 * Returns the data associated with the given player, or null if there is no data.
+	 * Load order when $xuid is set: xuid file, then name file.
 	 * TODO: we need an async version of this
 	 *
 	 * @throws PlayerDataLoadException
 	 */
-	public function loadData(string $name) : ?CompoundTag;
+	public function loadData(string $name, ?string $xuid = null) : ?CompoundTag;
 
 	/**
-	 * Saves data for the give player name.
+	 * Saves data for the given player name. When $xuid is set, also writes players/xuid/<xuid>.dat.
 	 *
 	 * @throws PlayerDataSaveException
 	 */
-	public function saveData(string $name, CompoundTag $data) : void;
+	public function saveData(string $name, CompoundTag $data, ?string $xuid = null) : void;
 }

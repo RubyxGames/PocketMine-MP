@@ -30,7 +30,6 @@ use pocketmine\plugin\PluginBase;
 use pocketmine\plugin\PluginManager;
 use pocketmine\Server;
 use pocketmine\thread\ThreadCrashInfoFrame;
-use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\Filesystem;
 use pocketmine\utils\Utils;
 use pocketmine\VersionInfo;
@@ -43,6 +42,7 @@ use function file;
 use function file_exists;
 use function file_get_contents;
 use function get_loaded_extensions;
+use function is_string;
 use function json_encode;
 use function ksort;
 use function max;
@@ -55,7 +55,6 @@ use function ob_start;
 use function php_uname;
 use function phpinfo;
 use function phpversion;
-use function preg_replace;
 use function sprintf;
 use function str_split;
 use function str_starts_with;
@@ -163,12 +162,12 @@ class CrashDump{
 		global $argv;
 
 		if($this->server->getConfigGroup()->getPropertyBool(YmlServerProperties::AUTO_REPORT_SEND_SETTINGS, true)){
-			$this->data->parameters = (array) $argv;
+			$this->data->parameters = CrashDumpScrubber::scrubArgv((array) $argv);
 			if(($serverDotProperties = @file_get_contents(Path::join($this->server->getDataPath(), "server.properties"))) !== false){
-				$this->data->serverDotProperties = preg_replace("#^rcon\\.password=(.*)$#m", "rcon.password=******", $serverDotProperties) ?? throw new AssumptionFailedError("Pattern is valid");
+				$this->data->serverDotProperties = CrashDumpScrubber::scrubServerProperties($serverDotProperties);
 			}
 			if(($pocketmineDotYml = @file_get_contents(Path::join($this->server->getDataPath(), "pocketmine.yml"))) !== false){
-				$this->data->pocketmineDotYml = $pocketmineDotYml;
+				$this->data->pocketmineDotYml = CrashDumpScrubber::scrubYaml($pocketmineDotYml);
 			}
 		}
 		$extensions = [];
@@ -183,8 +182,9 @@ class CrashDump{
 		if($this->server->getConfigGroup()->getPropertyBool(YmlServerProperties::AUTO_REPORT_SEND_PHPINFO, true)){
 			ob_start();
 			phpinfo();
-			$this->data->phpinfo = ob_get_contents(); // @phpstan-ignore-line
+			$phpinfo = ob_get_contents(); // @phpstan-ignore-line
 			ob_end_clean();
+			$this->data->phpinfo = is_string($phpinfo) ? CrashDumpScrubber::scrubPhpInfo($phpinfo) : "";
 		}
 	}
 

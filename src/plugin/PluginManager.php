@@ -137,6 +137,19 @@ class PluginManager{
 		$language = $this->server->getLanguage();
 		$this->server->getLogger()->info($this->server->getLanguage()->translate(KnownTranslationFactory::pocketmine_plugin_load($description->getFullName())));
 
+		if($this->server->getConfigGroup()->getPropertyBool("plugins.security-scan", true)){
+			$mode = strtolower($this->server->getConfigGroup()->getPropertyString("plugins.security-scan-mode", "warn"));
+			$findings = PluginSecurityScanner::scanPath($path, $mode === "fail");
+			if($findings !== []){
+				$msg = "Plugin security scan flagged dangerous calls in " . $description->getName() . ": " . implode(", ", $findings);
+				if($mode === "fail"){
+					$this->server->getLogger()->critical($msg);
+					return null;
+				}
+				$this->server->getLogger()->warning($msg);
+			}
+		}
+
 		$dataFolder = $this->getDataDirectory($path, $description->getName());
 		if(file_exists($dataFolder) && !is_dir($dataFolder)){
 			$this->server->getLogger()->critical($language->translate(KnownTranslationFactory::pocketmine_plugin_loadError(
@@ -230,7 +243,11 @@ class PluginManager{
 	 * @param string[]|null $newLoaders
 	 * @phpstan-param list<class-string<PluginLoader>> $newLoaders
 	 */
-	private function triagePlugins(string $path, PluginLoadTriage $triage, int &$loadErrorCount, ?array $newLoaders = null) : void{
+	/**
+	 * @param string[]|null $newLoaders
+	 * @phpstan-param list<string>|null $newLoaders
+	 */
+	private function triagePlugins(string $path, PluginLoadTriage $triage, int &$loadErrorCount, ?array $newLoaders = null, bool $ignoreAlreadyQueued = false) : void{
 		if(is_array($newLoaders)){
 			$loaders = [];
 			foreach($newLoaders as $key){
@@ -297,7 +314,29 @@ class PluginManager{
 					continue;
 				}
 
-				if(isset($triage->plugins[$name]) || $this->getPlugin($name) instanceof Plugin){
+				$missingCaps = $this->server->getCapabilities()->missing($description->getRequiresCapabilities());
+				if(count($missingCaps) > 0){
+					$this->server->getLogger()->critical($this->server->getLanguage()->translate(KnownTranslationFactory::pocketmine_plugin_loadError(
+						$name,
+						"Missing server capabilities: " . implode(", ", $missingCaps)
+					)));
+					$loadErrorCount++;
+					continue;
+				}
+
+				if($this->getPlugin($name) instanceof Plugin){
+					// Already loaded successfully (e.g. second FolderPluginLoader from DevTools).
+					$this->server->getLogger()->debug("Skipping duplicate discovery of already-loaded plugin $name");
+					continue;
+				}
+				if(isset($triage->plugins[$name])){
+					// Re-scan after a newly registered loader often rediscovers folders already queued by
+					// core FolderPluginLoader — that is not a real conflict (unlike two different paths
+					// claiming the same name in the initial triage pass).
+					if($ignoreAlreadyQueued){
+						$this->server->getLogger()->debug("Skipping already-queued plugin $name during loader re-triage");
+						continue;
+					}
 					$this->server->getLogger()->critical($this->server->getLanguage()->translate(KnownTranslationFactory::pocketmine_plugin_duplicateError($name)));
 					$loadErrorCount++;
 					continue;
@@ -383,7 +422,7 @@ class PluginManager{
 						if(count($diffLoaders) !== 0){
 							$this->server->getLogger()->debug("Plugin $name registered a new plugin loader during load, scanning for new plugins");
 							$plugins = $triage->plugins;
-							$this->triagePlugins($path, $triage, $loadErrorCount, $diffLoaders);
+							$this->triagePlugins($path, $triage, $loadErrorCount, $diffLoaders, true);
 							$diffPlugins = array_diff_key($triage->plugins, $plugins);
 							$this->server->getLogger()->debug("Re-triage found plugins: " . implode(", ", array_keys($diffPlugins)));
 						}
@@ -530,6 +569,37 @@ class PluginManager{
 			$plugin->getScheduler()->shutdown();
 			HandlerListManager::global()->unregisterAll($plugin);
 		}
+	}
+
+	/**
+	 * Soft-reloads a plugin by disabling then enabling the same instance.
+	 * Does NOT reload PHP source or classes from disk.
+	 *
+	 * @throws \InvalidArgumentException if other enabled plugins depend on this one
+	 */
+	public function reloadPlugin(Plugin $plugin) : bool{
+		$name = $plugin->getDescription()->getName();
+		if(!isset($this->plugins[$name]) || $this->plugins[$name] !== $plugin){
+			throw new \InvalidArgumentException("Plugin \"$name\" is not managed by this PluginManager");
+		}
+
+		$dependents = [];
+		if(isset($this->pluginDependents[$name])){
+			foreach(array_keys($this->pluginDependents[$name]) as $dependentName){
+				$dependent = $this->plugins[$dependentName] ?? null;
+				if($dependent !== null && $dependent->isEnabled()){
+					$dependents[] = $dependentName;
+				}
+			}
+		}
+		if(count($dependents) > 0){
+			throw new \InvalidArgumentException("Cannot reload \"$name\" while dependents are enabled: " . implode(", ", $dependents));
+		}
+
+		if($plugin->isEnabled()){
+			$this->disablePlugin($plugin);
+		}
+		return $this->enablePlugin($plugin);
 	}
 
 	public function tickSchedulers(int $currentTick) : void{

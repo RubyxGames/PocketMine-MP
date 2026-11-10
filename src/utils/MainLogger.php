@@ -198,7 +198,9 @@ class MainLogger extends AttachableThreadSafeLogger implements \BufferedLogger{
 		$this->synchronized(function() use ($message, $level, $time) : void{
 			Terminal::writeLine($message);
 			if($this->logWriterThread !== null){
-				$this->logWriterThread->write($time->format("Y-m-d") . " " . TextFormat::clean($message) . PHP_EOL);
+				// Keep Minecraft § codes in the file so external viewers (e.g. rb) can render
+				// the same Terminal palette instead of inventing their own level colours.
+				$this->logWriterThread->write($time->format("Y-m-d") . " " . TextFormat::clean($message, false) . PHP_EOL);
 			}
 
 			/**

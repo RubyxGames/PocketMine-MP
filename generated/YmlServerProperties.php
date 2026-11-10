@@ -62,6 +62,10 @@ final class YmlServerProperties{
 	public const CHUNK_TICKING_BLOCKS_PER_SUBCHUNK_PER_TICK = 'chunk-ticking.blocks-per-subchunk-per-tick';
 	public const CHUNK_TICKING_DISABLE_BLOCK_TICKING = 'chunk-ticking.disable-block-ticking';
 	public const CHUNK_TICKING_TICK_RADIUS = 'chunk-ticking.tick-radius';
+	public const CHUNK_TICKING_UNLOAD = 'chunk-ticking.unload';
+	public const CHUNK_TICKING_UNLOAD_ENABLED = 'chunk-ticking.unload.enabled';
+	public const CHUNK_TICKING_UNLOAD_IDLE_TICKS = 'chunk-ticking.unload.idle-ticks';
+	public const CHUNK_TICKING_UNLOAD_MAX_CHUNKS_PER_TICK = 'chunk-ticking.unload.max-chunks-per-tick';
 	public const CONSOLE = 'console';
 	public const CONSOLE_ENABLE_INPUT = 'console.enable-input';
 	public const CONSOLE_TITLE_TICK = 'console.title-tick';
@@ -69,6 +73,7 @@ final class YmlServerProperties{
 	public const DEBUG_LEVEL = 'debug.level';
 	public const LEVEL_SETTINGS = 'level-settings';
 	public const LEVEL_SETTINGS_DEFAULT_FORMAT = 'level-settings.default-format';
+	public const LEVEL_SETTINGS_MIN_Y = 'level-settings.min-y';
 	public const MEMORY = 'memory';
 	public const MEMORY_ASYNC_WORKER_HARD_LIMIT = 'memory.async-worker-hard-limit';
 	public const MEMORY_CHECK_RATE = 'memory.check-rate';

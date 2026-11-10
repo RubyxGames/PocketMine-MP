@@ -94,12 +94,16 @@ class FetchAuthKeysTask extends AsyncTask{
 		$this->errors = $errors === [] ? null : new NonThreadSafeValue($errors);
 	}
 
+	######################
 	/**
+	 * RubyxNet: Добавлен параметр $timeout = 4.0 сек (по умолчанию у simpleCurl 10 сек).
+	 * Предотвращает зависание потока cURL при недоступности или медленном DNS discovery-сервисов.
+	 *
 	 * @throws \RuntimeException
 	 */
-	private static function fetchURL(string $url, int $expectedCode) : InternetRequestResult{
+	private static function fetchURL(string $url, int $expectedCode, float $timeout = 4.0) : InternetRequestResult{
 		try{
-			$result = Internet::simpleCurl($url);
+			$result = Internet::simpleCurl($url, $timeout);
 			if($result->getCode() !== $expectedCode){
 				throw new \RuntimeException("Unexpected HTTP response code accessing \"$url\": " . $result->getCode());
 			}
@@ -108,6 +112,7 @@ class FetchAuthKeysTask extends AsyncTask{
 			throw new \RuntimeException("Failed accessing \"$url\": " . $e->getMessage(), 0, $e);
 		}
 	}
+	######################
 
 	private function getAuthServiceURI() : string{
 		$result = self::fetchURL(self::MINECRAFT_SERVICES_DISCOVERY_URL, 200);

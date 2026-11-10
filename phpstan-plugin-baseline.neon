@@ -1,0 +1,18 @@
+# Optional PHPStan config for *plugin* analysis against the supported PocketMine API surface.
+# Include from a plugin's phpstan.neon:
+#   includes:
+#     - ../../phpstan-plugin-baseline.neon
+#
+# Hard composer package split is wontfix; this ban-list documents unstable internals instead.
+# Core itself does not use this file (plugins do).
+
+parameters:
+	ignoreErrors: []
+	# Prefer forbidding direct use of protocol/serializer internals in plugin code.
+	# Requires phpstan-deprecation-rules or a custom banned_code extension when available.
+	# Documented banned namespaces for plugins (manual / IDE review):
+	# - pocketmine\network\mcpe\protocol (except via Player / NetworkSession public APIs)
+	# - pocketmine\network\mcpe\convert
+	# - pocketmine\data\bedrock\block\convert (except documented datapack helpers)
+	# - pocketmine\network\mcpe\handler
+	# Use ServerCapabilities + public managers instead of class_exists on internals.

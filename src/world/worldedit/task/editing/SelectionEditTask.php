@@ -1,0 +1,115 @@
+<?php
+
+namespace pocketmine\world\worldedit\task\editing;
+
+use pocketmine\world\worldedit\WorldEdit;
+use pocketmine\world\worldedit\result\EditTaskResult;
+use pocketmine\world\worldedit\selection\BlockListSelection;
+use pocketmine\world\worldedit\selection\identifier\SelectionIdentifier;
+use pocketmine\world\worldedit\selection\identifier\SelectionSerializer;
+use pocketmine\world\worldedit\selection\Selection;
+use pocketmine\world\worldedit\selection\SelectionContext;
+use pocketmine\world\worldedit\task\ExecutableTask;
+use pocketmine\world\worldedit\thread\EditThread;
+use pocketmine\world\worldedit\utils\ExtendedBinaryStream;
+
+/**
+ * @extends ExecutableTask<EditTaskResult>
+ */
+abstract class SelectionEditTask extends ExecutableTask implements ChunkedTask
+{
+	protected SelectionContext $context;
+	protected BlockListSelection $undo;
+	protected EditTaskHandler $handler;
+
+	/**
+	 * @param SelectionIdentifier   $selection
+	 * @param SelectionContext|null $context
+	 */
+	public function __construct(private SelectionIdentifier $selection, ?SelectionContext $context = null)
+	{
+		$this->context = $context ?? SelectionContext::full();
+		parent::__construct();
+	}
+
+	/**
+	 * @return EditTaskResult
+	 */
+	protected function executeInternal(): EditTaskResult
+	{
+		$handler = $this->getChunkHandler();
+		WorldEdit::getEnv()->initChunkHandler($handler);
+		$this->undo = $this->createUndoBlockList();
+		$this->handler = new EditTaskHandler($this->getTargetWorld(), $this->undo);
+		WorldEdit::getEnv()->executeChunkedTask($this, $handler, $this->handler, $this->sortChunks($this->getSelection()->getNeededChunks()));
+
+		EditThread::getInstance()->debug("Task " . $this->getTaskName() . ":" . $this->getTaskId() . " was executed successful, changing " . $this->handler->getChangedBlockCount() . " blocks (" . $this->handler->getReadBlockCount() . " read, " . $this->handler->getWrittenBlockCount() . " written)");
+		return $this->toTaskResult();
+	}
+
+	protected function toTaskResult(): EditTaskResult
+	{
+		return new EditTaskResult($this->handler->getChangedBlockCount(), $this->undo);
+	}
+
+	public function attemptRecovery(): EditTaskResult
+	{
+		return $this->toTaskResult();
+	}
+
+	/**
+	 * @return BlockListSelection
+	 */
+	abstract public function createUndoBlockList(): BlockListSelection;
+
+	public function canExecuteOnMainThread(): bool
+	{
+		return $this->getChunkHandler()->checkLoaded($this->getSelection());
+	}
+
+	/**
+	 * This method may only shuffle the chunks, not add or remove any (otherwise stuff will break, beware!)
+	 * @param int[] $chunks
+	 * @return int[]
+	 */
+	protected function sortChunks(array $chunks): array
+	{
+		return $chunks;
+	}
+
+	public function putData(ExtendedBinaryStream $stream): void
+	{
+		$stream->putString(SelectionSerializer::fastSerialize($this->selection));
+		$stream->putString($this->context->fastSerialize());
+	}
+
+	public function parseData(ExtendedBinaryStream $stream): void
+	{
+		$this->selection = SelectionSerializer::fastDeserialize($stream->getString());
+		$this->context = SelectionContext::fastDeserialize($stream->getString());
+	}
+
+	/**
+	 * @return Selection
+	 */
+	public function getSelection(): Selection
+	{
+		return $this->selection->asSelection();
+	}
+
+	/**
+	 * @return GroupedChunkHandler
+	 */
+	protected function getChunkHandler(): GroupedChunkHandler
+	{
+		return new SingleChunkHandler($this->getTargetWorld());
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getTargetWorld(): string
+	{
+		return $this->selection->asSelection()->getWorldName();
+	}
+}

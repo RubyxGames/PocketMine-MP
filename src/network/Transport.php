@@ -29,6 +29,16 @@ use pocketmine\network\mcpe\PacketBroadcaster;
 
 /**
  * Represents a network transport (e.g. RakNet, NetherNet) that provides network interfaces for player connections.
+ *
+ * Plugins can register additional transports with {@link Network::registerTransport()} during early startup
+ * (for example from {@see \pocketmine\plugin\PluginBase::onLoad()} or a server enable callback that runs before
+ * network interfaces start). Users then enable the transport by name in `pocketmine.yml` under `transport.name`.
+ *
+ * Example:
+ * ```
+ * $server->getNetwork()->registerTransport("myproxy", new MyProxyTransport($server));
+ * // pocketmine.yml: transport.name: nethernet,myproxy
+ * ```
  */
 interface Transport{
 
@@ -36,6 +46,9 @@ interface Transport{
 	 * Creates and returns the network interfaces for this transport.
 	 *
 	 * Broadcasters must be passed to each created NetworkSession so packets can be broadcast across all transports.
+	 *
+	 * Returning an empty array is allowed when the transport is unavailable (e.g. a missing PHP extension); the server
+	 * continues with other active transports and fails only if none start any interface.
 	 *
 	 * @return NetworkInterface[]
 	 * @throws NetworkInterfaceStartException

@@ -1,0 +1,16 @@
+; Recommended PHP hardening for Axolotl / PocketMine hosts.
+; Copy relevant lines into the runtime php.ini (or a scanned .ini drop-in).
+; This is NOT a process sandbox — only reduces the PHP attack surface for plugins.
+
+; Block common shell / process execution sinks used by malicious plugins.
+disable_functions = eval,exec,shell_exec,passthru,proc_open,popen,pcntl_exec,system,create_function
+
+; Optional: confine filesystem access to the server data directory.
+; Adjust the path to your bind-mount / server root.
+; open_basedir = /data
+
+; Keep dangerous URL wrappers off unless you intentionally need them.
+allow_url_include = Off
+
+; assert() can be used as an eval-like sink when assertions are active.
+zend.assertions = -1
