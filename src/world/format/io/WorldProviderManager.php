@@ -28,6 +28,7 @@ use pocketmine\world\format\io\leveldb\LevelDB;
 use pocketmine\world\format\io\region\Anvil;
 use pocketmine\world\format\io\region\McRegion;
 use pocketmine\world\format\io\region\PMAnvil;
+use pocketmine\world\format\io\region\WritableAnvil;
 use function strtolower;
 use function trim;
 
@@ -45,7 +46,9 @@ final class WorldProviderManager{
 		$this->default = $leveldb;
 		$this->addProvider($leveldb, "leveldb");
 
-		$this->addProvider(new ReadOnlyWorldProviderManagerEntry(Anvil::isValid(...), fn(string $path, \Logger $logger) => new Anvil($path, $logger)), "anvil");
+		// Legacy Anvil with write (pre-1.13). Modern Java 1.13+ palette still deferred.
+		$anvil = new WritableWorldProviderManagerEntry(Anvil::isValid(...), fn(string $path, \Logger $logger) => new WritableAnvil($path, $logger), WritableAnvil::generate(...));
+		$this->addProvider($anvil, "anvil");
 		$this->addProvider(new ReadOnlyWorldProviderManagerEntry(McRegion::isValid(...), fn(string $path, \Logger $logger) => new McRegion($path, $logger)), "mcregion");
 		$this->addProvider(new ReadOnlyWorldProviderManagerEntry(PMAnvil::isValid(...), fn(string $path, \Logger $logger) => new PMAnvil($path, $logger)), "pmanvil");
 	}

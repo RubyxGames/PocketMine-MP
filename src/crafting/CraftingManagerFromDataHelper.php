@@ -37,6 +37,7 @@ use pocketmine\data\bedrock\item\SavedItemStackData;
 use pocketmine\data\SavedDataLoadingException;
 use pocketmine\errorhandler\ErrorToExceptionHandler;
 use pocketmine\item\Item;
+use pocketmine\item\UnknownItem;
 use pocketmine\nbt\LittleEndianNbtSerializer;
 use pocketmine\utils\Filesystem;
 use pocketmine\utils\Utils;
@@ -46,6 +47,7 @@ use function base64_decode;
 use function count;
 use function get_debug_type;
 use function is_array;
+use function is_file;
 use function is_object;
 use function json_decode;
 
@@ -141,20 +143,32 @@ final class CraftingManagerFromDataHelper{
 		);
 
 		try{
-			return GlobalItemDataHandlers::getDeserializer()->deserializeStack($itemStackData);
+			$item = GlobalItemDataHandlers::getDeserializer()->deserializeStack($itemStackData);
 		}catch(ItemTypeDeserializeException){
 			//probably unknown item
 			return null;
 		}
+		// UnknownItem is for world/player round-trip only — keep unimplemented bedrock-data
+		// entries (e.g. shelf_mushroom) out of creative inventory and recipes.
+		if($item instanceof UnknownItem){
+			return null;
+		}
+		return $item;
 	}
 
 	/**
 	 * @return mixed[]
-	 *
 	 * @phpstan-template TData of object
 	 * @phpstan-param class-string<TData> $modelCLass
 	 * @phpstan-return list<TData>
 	 */
+	public static function loadJsonArrayOfObjectsFileIfExists(string $filePath, string $modelCLass) : array{
+		if(!is_file($filePath)){
+			return [];
+		}
+		return self::loadJsonArrayOfObjectsFile($filePath, $modelCLass);
+	}
+
 	public static function loadJsonArrayOfObjectsFile(string $filePath, string $modelCLass) : array{
 		$recipes = json_decode(Filesystem::fileGetContents($filePath));
 		if(!is_array($recipes)){
@@ -191,7 +205,7 @@ final class CraftingManagerFromDataHelper{
 	 * @phpstan-param class-string<TRecipeData> $modelClass
 	 * @phpstan-return list<TRecipeData>
 	 */
-	private static function loadJsonObjectListIntoModel(\JsonMapper $mapper, string $modelClass, array $data) : array{
+	public static function loadJsonObjectListIntoModel(\JsonMapper $mapper, string $modelClass, array $data) : array{
 		$result = [];
 		foreach(Utils::promoteKeys($data) as $i => $item){
 			if(!is_object($item)){
@@ -208,8 +222,16 @@ final class CraftingManagerFromDataHelper{
 
 	public static function make(string $directoryPath) : CraftingManager{
 		$result = new CraftingManager();
+		self::loadInto($result, $directoryPath);
+		return $result;
+	}
 
-		foreach(self::loadJsonArrayOfObjectsFile(Path::join($directoryPath, 'shapeless_crafting.json'), ShapelessRecipeData::class) as $recipe){
+	/**
+	 * Merges recipe JSON files from $directoryPath into an existing CraftingManager.
+	 * Missing files are skipped (datapack folders may ship only some recipe types).
+	 */
+	public static function loadInto(CraftingManager $result, string $directoryPath) : void{
+		foreach(self::loadJsonArrayOfObjectsFileIfExists(Path::join($directoryPath, 'shapeless_crafting.json'), ShapelessRecipeData::class) as $recipe){
 			$recipeType = match($recipe->block){
 				"crafting_table" => ShapelessRecipeType::CRAFTING,
 				"stonecutter" => ShapelessRecipeType::STONECUTTER,
@@ -260,7 +282,7 @@ final class CraftingManagerFromDataHelper{
 				));
 			}
 		}
-		foreach(self::loadJsonArrayOfObjectsFile(Path::join($directoryPath, 'shaped_crafting.json'), ShapedRecipeData::class) as $recipe){
+		foreach(self::loadJsonArrayOfObjectsFileIfExists(Path::join($directoryPath, 'shaped_crafting.json'), ShapedRecipeData::class) as $recipe){
 			if($recipe->block !== "crafting_table"){ //TODO: filter others out for now to avoid breaking economics
 				continue;
 			}
@@ -288,7 +310,7 @@ final class CraftingManagerFromDataHelper{
 			));
 		}
 
-		foreach(self::loadJsonArrayOfObjectsFile(Path::join($directoryPath, 'potion_type.json'), PotionTypeRecipeData::class) as $recipe){
+		foreach(self::loadJsonArrayOfObjectsFileIfExists(Path::join($directoryPath, 'potion_type.json'), PotionTypeRecipeData::class) as $recipe){
 			$input = self::deserializeIngredient($recipe->input);
 			$ingredient = self::deserializeIngredient($recipe->ingredient);
 			$output = self::deserializeItemStack($recipe->output);
@@ -301,7 +323,7 @@ final class CraftingManagerFromDataHelper{
 				$output
 			));
 		}
-		foreach(self::loadJsonArrayOfObjectsFile(Path::join($directoryPath, 'potion_container_change.json'), PotionContainerChangeRecipeData::class) as $recipe){
+		foreach(self::loadJsonArrayOfObjectsFileIfExists(Path::join($directoryPath, 'potion_container_change.json'), PotionContainerChangeRecipeData::class) as $recipe){
 			$ingredient = self::deserializeIngredient($recipe->ingredient);
 			if($ingredient === null){
 				continue;
@@ -326,7 +348,5 @@ final class CraftingManagerFromDataHelper{
 		}
 
 		//TODO: smithing
-
-		return $result;
 	}
 }

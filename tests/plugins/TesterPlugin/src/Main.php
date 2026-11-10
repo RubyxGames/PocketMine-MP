@@ -72,7 +72,53 @@ class Main extends PluginBase implements Listener{
 						throw new TestFailedException();
 					}
 				}
-			)
+			),
+			new ClosureTest(
+				$this->getLogger(),
+				"Wave10 capabilities present",
+				"Checks camera-instruction / movement-guard / unknown-block / datapacks / plugin-security-scan",
+				function() : void{
+					$caps = $this->getServer()->getCapabilities();
+					foreach([
+						"camera-instruction",
+						"movement-guard",
+						"unknown-block",
+						"datapacks",
+						"plugin-security-scan",
+					] as $id){
+						if(!$caps->has($id)){
+							throw new TestFailedException("missing capability $id");
+						}
+					}
+				}
+			),
+			new ClosureTest(
+				$this->getLogger(),
+				"Player camera API methods",
+				"Reflection check for Wave 9/10 camera methods on Player",
+				function() : void{
+					foreach([
+						"shakeCamera", "fadeCamera", "clearCamera", "sendCameraPresets", "setCamera", "setCameraFov", "setCameraTarget",
+						"setCameraSpline", "attachCameraToEntity", "detachCameraFromEntity", "sendCameraAimAssistPresets", "sendCameraAimAssist",
+					] as $m){
+						if(!method_exists(\pocketmine\player\Player::class, $m)){
+							throw new TestFailedException("missing Player::$m");
+						}
+					}
+				}
+			),
+			new ClosureTest(
+				$this->getLogger(),
+				"SimpleForm serialize smoke",
+				"Builds a SimpleForm and checks jsonSerialize shape",
+				function() : void{
+					$form = (new \pocketmine\form\SimpleForm())->setTitle("t")->setContent("c")->addButton("b");
+					$json = $form->jsonSerialize();
+					if(($json["type"] ?? null) !== "form" || ($json["title"] ?? null) !== "t"){
+						throw new TestFailedException("bad SimpleForm json");
+					}
+				}
+			),
 		];
 	}
 

@@ -138,18 +138,17 @@ class BanList{
 
 	public function save(bool $writeHeader = true) : void{
 		$this->removeExpired();
-		$fp = @fopen($this->file, "w");
-		if(is_resource($fp)){
-			if($writeHeader){
-				fwrite($fp, "# victim name | ban date | banned by | banned until | reason\n\n");
-			}
-
-			foreach($this->list as $entry){
-				fwrite($fp, $entry->getString() . "\n");
-			}
-			fclose($fp);
-		}else{
-			\GlobalLogger::get()->error("Could not save ban list");
+		$contents = "";
+		if($writeHeader){
+			$contents .= "# victim name | ban date | banned by | banned until | reason\n\n";
+		}
+		foreach($this->list as $entry){
+			$contents .= $entry->getString() . "\n";
+		}
+		try{
+			\pocketmine\utils\Filesystem::safeFilePutContents($this->file, $contents);
+		}catch(\RuntimeException $e){
+			\GlobalLogger::get()->error("Could not save ban list: " . $e->getMessage());
 		}
 	}
 }

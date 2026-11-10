@@ -41,6 +41,7 @@ final class DefaultPermissionNames{
 	public const COMMAND_GAMEMODE_OTHER = "pocketmine.command.gamemode.other";
 	public const COMMAND_GAMEMODE_SELF = "pocketmine.command.gamemode.self";
 	public const COMMAND_GC = "pocketmine.command.gc";
+	public const COMMAND_GAMERULE = "pocketmine.command.gamerule";
 	public const COMMAND_GIVE_OTHER = "pocketmine.command.give.other";
 	public const COMMAND_GIVE_SELF = "pocketmine.command.give.self";
 	public const COMMAND_HELP = "pocketmine.command.help";
@@ -58,7 +59,15 @@ final class DefaultPermissionNames{
 	public const COMMAND_SAVE_PERFORM = "pocketmine.command.save.perform";
 	public const COMMAND_SAY = "pocketmine.command.say";
 	public const COMMAND_SEED = "pocketmine.command.seed";
+	public const COMMAND_SESSIONRECORD = "pocketmine.command.sessionrecord";
+	public const COMMAND_DDUI = "pocketmine.command.ddui";
+	public const COMMAND_RESOURCEPACKS = "pocketmine.command.resourcepacks";
+	public const COMMAND_WORLD = "pocketmine.command.world";
+	public const COMMAND_PLUGIN = "pocketmine.command.plugin";
+	public const COMMAND_TICK = "pocketmine.command.tick";
 	public const COMMAND_SETWORLDSPAWN = "pocketmine.command.setworldspawn";
+	public const COMMAND_SPAWN_OTHER = "pocketmine.command.spawn.other";
+	public const COMMAND_SPAWN_SELF = "pocketmine.command.spawn.self";
 	public const COMMAND_SPAWNPOINT_OTHER = "pocketmine.command.spawnpoint.other";
 	public const COMMAND_SPAWNPOINT_SELF = "pocketmine.command.spawnpoint.self";
 	public const COMMAND_STATUS = "pocketmine.command.status";

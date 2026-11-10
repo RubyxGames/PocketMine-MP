@@ -30,9 +30,11 @@ use pocketmine\entity\effect\EffectInstance;
 use pocketmine\event\player\PlayerDuplicateLoginEvent;
 use pocketmine\event\player\PlayerIdentityVerifyEvent;
 use pocketmine\event\player\PlayerResourcePackOfferEvent;
+use pocketmine\event\player\SessionDisconnectEvent;
 use pocketmine\event\server\DataPacketDecodeEvent;
 use pocketmine\event\server\DataPacketReceiveEvent;
 use pocketmine\event\server\DataPacketSendEvent;
+use pocketmine\form\ddui\DduiSessionManager;
 use pocketmine\form\Form;
 use pocketmine\item\Item;
 use pocketmine\lang\KnownTranslationFactory;
@@ -60,7 +62,22 @@ use pocketmine\network\mcpe\handler\PreSpawnPacketHandler;
 use pocketmine\network\mcpe\handler\ResourcePacksPacketHandler;
 use pocketmine\network\mcpe\handler\SessionStartPacketHandler;
 use pocketmine\network\mcpe\handler\SpawnResponsePacketHandler;
+use pocketmine\color\Color;
 use pocketmine\network\mcpe\protocol\AvailableCommandsPacket;
+use pocketmine\network\mcpe\protocol\CameraAimAssistPacket;
+use pocketmine\network\mcpe\protocol\CameraAimAssistPresetsPacket;
+use pocketmine\network\mcpe\protocol\CameraInstructionPacket;
+use pocketmine\network\mcpe\protocol\CameraPresetsPacket;
+use pocketmine\network\mcpe\protocol\CameraShakePacket;
+use pocketmine\network\mcpe\protocol\CameraSplinePacket;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistActionType;
+use pocketmine\network\mcpe\protocol\types\camera\CameraSplineDefinition;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistCategory;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistPreset;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistPresetsPacketOperation;
+use pocketmine\network\mcpe\protocol\types\camera\CameraAimAssistTargetMode;
+use pocketmine\network\mcpe\protocol\types\camera\CameraSplineInstruction;
+use pocketmine\math\Vector2;
 use pocketmine\network\mcpe\protocol\ChunkRadiusUpdatedPacket;
 use pocketmine\network\mcpe\protocol\ClientboundCloseFormPacket;
 use pocketmine\network\mcpe\protocol\ClientboundPacket;
@@ -89,8 +106,16 @@ use pocketmine\network\mcpe\protocol\TextPacket;
 use pocketmine\network\mcpe\protocol\ToastRequestPacket;
 use pocketmine\network\mcpe\protocol\TransferPacket;
 use pocketmine\network\mcpe\protocol\types\AbilitiesData;
+use pocketmine\network\mcpe\protocol\types\GatheringJoinInfo;
 use pocketmine\network\mcpe\protocol\types\AbilitiesLayer;
 use pocketmine\network\mcpe\protocol\types\BlockPosition;
+use pocketmine\network\mcpe\protocol\types\camera\CameraFadeInstruction;
+use pocketmine\network\mcpe\protocol\types\camera\CameraFadeInstructionColor;
+use pocketmine\network\mcpe\protocol\types\camera\CameraFadeInstructionTime;
+use pocketmine\network\mcpe\protocol\types\camera\CameraTargetInstruction;
+use pocketmine\network\mcpe\protocol\types\camera\CameraSetInstruction;
+use pocketmine\network\mcpe\protocol\types\camera\CameraPreset;
+use pocketmine\network\mcpe\protocol\types\camera\CameraFovInstruction;
 use pocketmine\network\mcpe\protocol\types\command\CommandData;
 use pocketmine\network\mcpe\protocol\types\command\CommandHardEnum;
 use pocketmine\network\mcpe\protocol\types\command\CommandOverload;
@@ -160,7 +185,7 @@ class NetworkSession{
 
 	private \PrefixedLogger $logger;
 	private ?Player $player = null;
-	private ?PlayerInfo $info = null;
+	protected ?PlayerInfo $info = null;
 	private ?int $ping = null;
 
 	private ?PacketHandler $handler = null;
@@ -172,7 +197,7 @@ class NetworkSession{
 
 	private bool $connected = true;
 	private bool $disconnectGuard = false;
-	private bool $loggedIn = false;
+	protected bool $loggedIn = false;
 	private bool $authenticated = false;
 	private int $connectTime;
 	private ?CompoundTag $cachedOfflinePlayerData = null;
@@ -193,7 +218,8 @@ class NetworkSession{
 	/** @phpstan-var \SplQueue<array{CompressBatchPromise|string, list<PromiseResolver<true>>, bool}> */
 	private \SplQueue $compressedQueue;
 	private bool $forceAsyncCompression = true;
-	private bool $enableCompression = false; //disabled until handshake completed
+	private ?int $protocolId = null;
+	protected bool $enableCompression = false; //disabled until handshake completed
 
 	private int $nextAckReceiptId = 0;
 	/**
@@ -203,6 +229,8 @@ class NetworkSession{
 	private array $ackPromisesByReceiptId = [];
 
 	private ?InventoryManager $invManager = null;
+
+	private ?DduiSessionManager $dduiManager = null;
 
 	/**
 	 * @var \Closure[]|ObjectSet
@@ -217,7 +245,7 @@ class NetworkSession{
 		private Server $server,
 		private NetworkSessionManager $manager,
 		private PacketPool $packetPool,
-		private PacketSender $sender,
+		protected PacketSender $sender,
 		private PacketBroadcaster $broadcaster,
 		private EntityEventBroadcaster $entityEventBroadcaster,
 		private Compressor $compressor,
@@ -295,6 +323,7 @@ class NetworkSession{
 		}
 
 		$this->invManager = new InventoryManager($this->player, $this);
+		$this->dduiManager = new DduiSessionManager($this, $this->server);
 
 		$effectManager = $this->player->getEffects();
 		$effectManager->getEffectAddHooks()->add($effectAddHook = function(EffectInstance $effect, bool $replacesOldEffect) : void{
@@ -356,6 +385,16 @@ class NetworkSession{
 	 */
 	public function updatePing(int $ping) : void{
 		$this->ping = $ping;
+		if($this->player !== null){
+			$qos = $this->server->getAdaptiveQosManager();
+			if($qos !== null){
+				$qos->notePing($this->player, $ping);
+			}
+			$recording = $this->server->getSessionRecordingManager();
+			if($recording !== null){
+				$recording->notePing($this->player, $ping);
+			}
+		}
 	}
 
 	public function getHandler() : ?PacketHandler{
@@ -388,6 +427,26 @@ class NetworkSession{
 		return false;
 	}
 
+	public function setProtocolId(int $protocolId) : void{
+		$this->protocolId = $protocolId;
+
+		$this->typeConverter = TypeConverter::getInstance($protocolId);
+		$this->broadcaster = $this->server->getPacketBroadcaster($protocolId);
+		$this->entityEventBroadcaster = $this->server->getEntityEventBroadcaster($this->broadcaster, $this->typeConverter);
+	}
+
+	public function getProtocolId() : int{
+		return $this->protocolId ?? ProtocolInfo::CURRENT_PROTOCOL;
+	}
+
+	/**
+	 * @return \Closure[]|ObjectSet
+	 * @phpstan-return ObjectSet<\Closure() : void>
+	 */
+	public function getDisposeHooks() : ObjectSet{
+		return $this->disposeHooks;
+	}
+
 	/**
 	 * @throws PacketHandlingException
 	 */
@@ -417,23 +476,35 @@ class NetworkSession{
 			}
 
 			if($this->enableCompression){
-				$compressionTypeId = ord($payload[0]);
-				$compressionType = CompressionAlgorithm::tryFrom($compressionTypeId);
-				$compressed = substr($payload, 1);
-				if($compressionType === CompressionAlgorithm::NONE){
-					$decompressed = $compressed;
-				}elseif($compressionType === $this->compressor->getNetworkType()){
-					Timings::$playerNetworkReceiveDecompress->startTiming();
+				if($this->protocolId >= ProtocolInfo::PROTOCOL_1_20_60){
+					$compressionTypeId = ord($payload[0]);
+					$compressionType = CompressionAlgorithm::tryFrom($compressionTypeId);
+					$compressed = substr($payload, 1);
+					if($compressionType === CompressionAlgorithm::NONE){
+						$decompressed = $compressed;
+					}elseif($compressionType === $this->compressor->getNetworkType()){
+						try{
+							Timings::$playerNetworkReceiveDecompress->startTiming();
+							$decompressed = $this->compressor->decompress($compressed);
+						}catch(DecompressionException $e){
+							$this->logger->debug("Failed to decompress packet: " . base64_encode($compressed));
+							throw PacketHandlingException::wrap($e, "Compressed packet batch decode error");
+						}finally{
+							Timings::$playerNetworkReceiveDecompress->stopTiming();
+						}
+					}else{
+						throw new PacketHandlingException("Packet compressed with unexpected compression type $compressionTypeId");
+					}
+				}else{
 					try{
-						$decompressed = $this->compressor->decompress($compressed);
+						Timings::$playerNetworkReceiveDecompress->startTiming();
+						$decompressed = $this->compressor->decompress($payload);
 					}catch(DecompressionException $e){
-						$this->logger->debug("Failed to decompress packet: " . base64_encode($compressed));
+						$this->logger->debug("Failed to decompress packet: " . base64_encode($payload));
 						throw PacketHandlingException::wrap($e, "Compressed packet batch decode error");
 					}finally{
 						Timings::$playerNetworkReceiveDecompress->stopTiming();
 					}
-				}else{
-					throw new PacketHandlingException("Packet compressed with unexpected compression type $compressionTypeId");
 				}
 			}else{
 				$decompressed = $payload;
@@ -538,7 +609,7 @@ class NetworkSession{
 			try{
 				$stream = new ByteBufferReader($buffer);
 				try{
-					$packet->decode($stream);
+					$packet->decode($stream, $this->getProtocolId());
 				}catch(PacketDecodeException $e){
 					throw PacketHandlingException::wrap($e);
 				}
@@ -616,7 +687,7 @@ class NetworkSession{
 			$writer = new ByteBufferWriter();
 			foreach($packets as $evPacket){
 				$writer->clear(); //memory reuse let's gooooo
-				$this->addToSendBuffer(self::encodePacketTimed($writer, $evPacket));
+				$this->addToSendBuffer(self::encodePacketTimed($writer, $this->getProtocolId(), $evPacket));
 			}
 			if($immediate){
 				$this->flushGamePacketQueue();
@@ -649,11 +720,11 @@ class NetworkSession{
 	/**
 	 * @internal
 	 */
-	public static function encodePacketTimed(ByteBufferWriter $serializer, ClientboundPacket $packet) : string{
+	public static function encodePacketTimed(ByteBufferWriter $serializer, int $protocolId, ClientboundPacket $packet) : string{
 		$timings = Timings::getEncodeDataPacketTimings($packet);
 		$timings->startTiming();
 		try{
-			$packet->encode($serializer);
+			$packet->encode($serializer, $protocolId);
 			return $serializer->getData();
 		}finally{
 			$timings->stopTiming();
@@ -680,7 +751,7 @@ class NetworkSession{
 				PacketBatch::encodeRaw($stream, $this->sendBuffer);
 
 				if($this->enableCompression){
-					$batch = $this->server->prepareBatch($stream->getData(), $this->compressor, $syncMode, Timings::$playerNetworkSendCompressSessionBuffer);
+					$batch = $this->server->prepareBatch($stream->getData(), $this->getProtocolId(), $this->compressor, $syncMode, Timings::$playerNetworkSendCompressSessionBuffer);
 				}else{
 					$batch = $stream->getData();
 				}
@@ -792,6 +863,10 @@ class NetworkSession{
 		if($this->connected && !$this->disconnectGuard){
 			$this->disconnectGuard = true;
 			$func();
+
+			$event = new SessionDisconnectEvent($this);
+			$event->call();
+
 			$this->disconnectGuard = false;
 			$this->flushGamePacketQueue();
 			$this->sender->close("");
@@ -824,6 +899,8 @@ class NetworkSession{
 	 * session, so it's safe to destroy any cycles and perform destructive cleanup.
 	 */
 	private function dispose() : void{
+		$this->dduiManager?->shutdown();
+		$this->dduiManager = null;
 		$this->invManager = null;
 	}
 
@@ -873,11 +950,23 @@ class NetworkSession{
 
 	/**
 	 * Instructs the remote client to connect to a different server.
+	 *
+	 * For NetherNet destinations, $ip/$port should be the destination signaling host and TCP signaling port
+	 * (see docs/nethernet.md).
+	 *
+	 * @param bool                     $reloadWorld       TransferPacket reload-world flag (protocol >= 1.21.30)
+	 * @param GatheringJoinInfo|null   $gatheringsConfig  Optional gatherings metadata (protocol >= 1.26.40)
 	 */
-	public function transfer(string $ip, int $port, Translatable|string|null $reason = null) : void{
+	public function transfer(
+		string $ip,
+		int $port,
+		Translatable|string|null $reason = null,
+		bool $reloadWorld = false,
+		?GatheringJoinInfo $gatheringsConfig = null
+	) : void{
 		$reason ??= KnownTranslationFactory::pocketmine_disconnect_transfer();
-		$this->tryDisconnect(function() use ($ip, $port, $reason) : void{
-			$this->sendDataPacket(TransferPacket::create($ip, $port, false, null), true);
+		$this->tryDisconnect(function() use ($ip, $port, $reason, $reloadWorld, $gatheringsConfig) : void{
+			$this->sendDataPacket(TransferPacket::create($ip, $port, $reloadWorld, $gatheringsConfig), true);
 			if($this->player !== null){
 				$this->player->onPostDisconnect($reason, null);
 			}
@@ -1004,7 +1093,8 @@ class NetworkSession{
 
 		//TODO: make player data loading async
 		//TODO: we shouldn't be loading player data here at all, but right now we don't have any choice :(
-		$this->cachedOfflinePlayerData = $this->server->getOfflinePlayerData($this->info->getUsername());
+		// Prefer players/xuid/<xuid>.dat when available, fall back to name .dat
+		$this->cachedOfflinePlayerData = $this->server->getOfflinePlayerData($this->info->getUsername(), $myXUID !== "" ? $myXUID : null);
 		if($checkXUID){
 			$recordedXUID = $this->cachedOfflinePlayerData !== null ? $this->cachedOfflinePlayerData->getTag(Player::TAG_LAST_KNOWN_XUID) : null;
 			if(!($recordedXUID instanceof StringTag)){
@@ -1040,19 +1130,37 @@ class NetworkSession{
 		$this->logger->debug("Initiating resource packs phase");
 
 		$packManager = $this->server->getResourcePackManager();
-		$resourcePacks = $packManager->getResourceStack();
-		$keys = [];
-		foreach($resourcePacks as $resourcePack){
-			$key = $packManager->getPackEncryptionKey($resourcePack->getPackId());
-			if($key !== null){
-				$keys[$resourcePack->getPackId()] = $key;
-			}
+		$stackProfile = null;
+		$defaultWorld = $this->server->getWorldManager()->getDefaultWorld();
+		if($defaultWorld !== null){
+			$stackProfile = $defaultWorld->getFolderName();
+			$resourcePacks = $packManager->getResourceStackForWorld($stackProfile);
+		}else{
+			$resourcePacks = $packManager->getResourceStack();
 		}
-		$event = new PlayerResourcePackOfferEvent($this->info, $resourcePacks, $keys, $packManager->resourcePacksRequired());
+		$keys = $packManager->getEncryptionKeysForStack($resourcePacks);
+		$cdnUrls = $packManager->getCdnUrls();
+		$event = new PlayerResourcePackOfferEvent(
+			$this->info,
+			$resourcePacks,
+			$keys,
+			$packManager->resourcePacksRequired(),
+			$cdnUrls,
+			$stackProfile
+		);
 		$event->call();
-		$this->setHandler(new ResourcePacksPacketHandler($this, $event->getResourcePacks(), $event->getEncryptionKeys(), $event->mustAccept(), function() : void{
-			$this->createPlayer();
-		}));
+		$this->setHandler(new ResourcePacksPacketHandler(
+			$this,
+			$event->getResourcePacks(),
+			$event->getEncryptionKeys(),
+			$event->mustAccept(),
+			function() : void{
+				$this->createPlayer();
+			},
+			$packManager->getPackChunkSize(),
+			$packManager->getPackChunkConcurrency(),
+			$event->getCdnUrls()
+		));
 	}
 
 	private function beginSpawnSequence() : void{
@@ -1230,7 +1338,7 @@ class NetworkSession{
 				CommandPermissions::NORMAL,
 				$aliasObj,
 				[
-					new CommandOverload(chaining: false, parameters: [CommandParameter::standard("args", AvailableCommandsPacket::ARG_TYPE_RAWTEXT, 0, true)])
+					new CommandOverload(chaining: false, parameters: [CommandParameter::standard("args", AvailableCommandsPacket::convertArg($this->getProtocolId(), AvailableCommandsPacket::ARG_TYPE_RAWTEXT), 0, true)])
 				],
 				chainedSubCommandData: []
 			);
@@ -1291,7 +1399,17 @@ class NetworkSession{
 	}
 
 	public function onCloseAllForms() : void{
+		$this->dduiManager?->closeAll();
+		$this->onCloseLegacyForms();
+	}
+
+	/** Closes JSON modal forms ({@link ModalFormRequestPacket}) without touching DDUI screens. */
+	public function onCloseLegacyForms() : void{
 		$this->sendDataPacket(ClientboundCloseFormPacket::create());
+	}
+
+	public function getDduiSessionManager() : DduiSessionManager{
+		return $this->dduiManager ??= new DduiSessionManager($this, $this->server);
 	}
 
 	/**
@@ -1314,7 +1432,7 @@ class NetworkSession{
 	 */
 	public function startUsingChunk(int $chunkX, int $chunkZ, \Closure $onCompletion) : void{
 		$world = $this->player->getLocation()->getWorld();
-		$promiseOrPacket = ChunkCache::getInstance($world, $this->compressor)->request($chunkX, $chunkZ);
+		$promiseOrPacket = ChunkCache::getInstance($world, $this->compressor)->request($chunkX, $chunkZ, $this->getTypeConverter());
 		if(is_string($promiseOrPacket)){
 			$this->sendChunkPacket($promiseOrPacket, $onCompletion, $world);
 			return;
@@ -1415,6 +1533,163 @@ class NetworkSession{
 		$this->sendDataPacket(ToastRequestPacket::create($title, $body));
 	}
 
+	public function onCameraShake(float $intensity, float $duration, int $type) : void{
+		$this->sendDataPacket(CameraShakePacket::create($intensity, $duration, $type, CameraShakePacket::ACTION_ADD));
+	}
+
+	public function onStopCameraShake() : void{
+		$this->sendDataPacket(CameraShakePacket::create(0.0, 0.0, CameraShakePacket::TYPE_ROTATIONAL, CameraShakePacket::ACTION_STOP));
+	}
+
+	public function onCameraFade(float $fadeInTime, float $stayTime, float $fadeOutTime, Color $color) : void{
+		$fade = new CameraFadeInstruction(
+			new CameraFadeInstructionTime($fadeInTime, $stayTime, $fadeOutTime),
+			new CameraFadeInstructionColor($color->getR() / 255.0, $color->getG() / 255.0, $color->getB() / 255.0)
+		);
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			null,
+			null,
+			$fade,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null
+		));
+	}
+
+	public function onCameraClear() : void{
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			null,
+			true,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null
+		));
+	}
+
+	/**
+	 * @param CameraPreset[] $presets
+	 */
+	public function onCameraPresets(array $presets) : void{
+		$this->sendDataPacket(CameraPresetsPacket::create($presets));
+	}
+
+	public function onCameraSet(CameraSetInstruction $set) : void{
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			$set,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null
+		));
+	}
+
+	public function onCameraFov(CameraFovInstruction $fov) : void{
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			null,
+			null,
+			null,
+			null,
+			null,
+			$fov,
+			null,
+			null,
+			null
+		));
+	}
+
+	public function onCameraTarget(?CameraTargetInstruction $target, bool $remove = false) : void{
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			null,
+			null,
+			null,
+			$remove ? null : $target,
+			$remove ? true : null,
+			null,
+			null,
+			null,
+			null
+		));
+	}
+
+	public function onCameraSpline(CameraSplineInstruction $spline) : void{
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			$spline,
+			null,
+			null
+		));
+	}
+
+	/**
+	 * @param list<CameraSplineDefinition>|CameraSplineDefinition[] $splines
+	 */
+	public function onNamedCameraSplines(array $splines) : void{
+		$this->sendDataPacket(CameraSplinePacket::create(array_values($splines)));
+	}
+
+	public function onCameraAttachToEntity(int $actorUniqueId) : void{
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			$actorUniqueId,
+			null
+		));
+	}
+
+	public function onCameraDetachFromEntity() : void{
+		$this->sendDataPacket(CameraInstructionPacket::create(
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			true
+		));
+	}
+
+	/**
+	 * @param CameraAimAssistCategory[] $categories
+	 * @param CameraAimAssistPreset[]   $presets
+	 */
+	public function onCameraAimAssistPresets(array $categories, array $presets, int $operation = CameraAimAssistPresetsPacketOperation::SET) : void{
+		$this->sendDataPacket(CameraAimAssistPresetsPacket::create($categories, $presets, $operation));
+	}
+
+	public function onCameraAimAssist(
+		string $presetId,
+		Vector2 $viewAngle,
+		float $distance,
+		CameraAimAssistTargetMode $targetMode,
+		CameraAimAssistActionType $actionType,
+		bool $showDebugRender = false
+	) : void{
+		$this->sendDataPacket(CameraAimAssistPacket::create($presetId, $viewAngle, $distance, $targetMode, $actionType, $showDebugRender));
+	}
+
 	public function onOpenSignEditor(Vector3 $signPosition, bool $frontSide) : void{
 		$this->sendDataPacket(OpenSignPacket::create(BlockPosition::fromVector3($signPosition), $frontSide));
 	}
@@ -1439,6 +1714,8 @@ class NetworkSession{
 
 			return;
 		}
+
+		$this->dduiManager?->tick($this->server->getTick());
 
 		if($this->player !== null){
 			$this->player->doChunkRequests();

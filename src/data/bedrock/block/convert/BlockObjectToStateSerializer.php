@@ -32,6 +32,7 @@ use pocketmine\data\bedrock\block\BlockStateData;
 use pocketmine\data\bedrock\block\BlockStateSerializeException;
 use pocketmine\data\bedrock\block\BlockStateSerializer;
 use pocketmine\data\bedrock\block\BlockTypeNames as Ids;
+use pocketmine\data\bedrock\block\UnknownBlockStateStore;
 use pocketmine\data\bedrock\block\convert\BlockStateSerializerHelper as Helper;
 use pocketmine\data\bedrock\block\convert\BlockStateWriter as Writer;
 use function get_class;
@@ -53,6 +54,10 @@ final class BlockObjectToStateSerializer implements BlockStateSerializer{
 	private array $cache = [];
 
 	public function serialize(int $stateId) : BlockStateData{
+		$preserved = UnknownBlockStateStore::get($stateId);
+		if($preserved !== null){
+			return $preserved;
+		}
 		//TODO: singleton usage not ideal
 		//TODO: we may want to deduplicate cache entries to avoid wasting memory
 		return $this->cache[$stateId] ??= $this->serializeBlock(RuntimeBlockStateRegistry::getInstance()->fromStateId($stateId));

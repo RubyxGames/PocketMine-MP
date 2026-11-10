@@ -26,6 +26,8 @@ namespace pocketmine\world\format\io\leveldb;
 use pocketmine\block\Block;
 use pocketmine\data\bedrock\BiomeIds;
 use pocketmine\data\bedrock\block\BlockStateDeserializeException;
+use pocketmine\data\bedrock\block\BlockStateData;
+use pocketmine\data\bedrock\block\UnknownBlockStateStore;
 use pocketmine\data\bedrock\block\convert\UnsupportedBlockStateException;
 use pocketmine\data\bedrock\WorldDataVersions;
 use pocketmine\nbt\LittleEndianNbtSerializer;
@@ -34,6 +36,7 @@ use pocketmine\nbt\NbtDataException;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\nbt\TreeRoot;
 use pocketmine\utils\Binary;
+use pocketmine\utils\Filesystem;
 use pocketmine\utils\BinaryDataException;
 use pocketmine\utils\BinaryStream;
 use pocketmine\utils\Utils;
@@ -66,10 +69,20 @@ use function is_dir;
 use function mkdir;
 use function ord;
 use function str_repeat;
+use function str_starts_with;
 use function strlen;
 use function substr;
+use function file_get_contents;
+use function is_array;
+use function is_int;
+use function is_numeric;
+use function json_decode;
+use function json_encode;
+use function max;
+use function time;
 use function trim;
 use function unpack;
+use const JSON_THROW_ON_ERROR;
 use const LEVELDB_ZLIB_RAW_COMPRESSION;
 
 class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
@@ -87,6 +100,8 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 
 	protected \LevelDB $db;
 
+	private static bool $levelDbSidecarEnabled = true;
+
 	private static function checkForLevelDBExtension() : void{
 		if(!extension_loaded('leveldb')){
 			throw new UnsupportedWorldFormatException("The leveldb PHP extension is required to use this world format");
@@ -100,6 +115,63 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 	/**
 	 * @throws \LevelDBException
 	 */
+	public static function setLevelDbSidecarEnabled(bool $enabled) : void{
+		self::$levelDbSidecarEnabled = $enabled;
+	}
+
+	/**
+	 * Seconds since LAST_FLUSH sidecar was written, or null if missing/disabled/unreadable.
+	 * Observability only — not a WAL.
+	 */
+	public function getLastFlushAgeSeconds() : ?int{
+		$meta = $this->getLastFlushMetadata();
+		if($meta === null){
+			return null;
+		}
+		return max(0, time() - $meta["unix"]);
+	}
+
+	/**
+	 * Parsed LAST_FLUSH sidecar metadata, or null if missing/disabled/unreadable.
+	 * Supports legacy plain unix timestamp and JSON `{unix,tick,chunk_x,chunk_z}`.
+	 *
+	 * @return array{unix: int, tick: ?int, chunk_x: ?int, chunk_z: ?int}|null
+	 */
+	public function getLastFlushMetadata() : ?array{
+		if(!self::$levelDbSidecarEnabled){
+			return null;
+		}
+		$path = Path::join($this->getPath(), "db", "LAST_FLUSH");
+		if(!file_exists($path)){
+			return null;
+		}
+		$raw = @file_get_contents($path);
+		if($raw === false){
+			return null;
+		}
+		$raw = trim($raw);
+		if($raw === ""){
+			return null;
+		}
+		if(is_numeric($raw)){
+			return ["unix" => (int) $raw, "tick" => null, "chunk_x" => null, "chunk_z" => null];
+		}
+		try{
+			$data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+		}catch(\Throwable){
+			return null;
+		}
+		if(!is_array($data) || !isset($data["unix"]) || !is_numeric($data["unix"])){
+			return null;
+		}
+		return [
+			"unix" => (int) $data["unix"],
+			"tick" => isset($data["tick"]) && is_numeric($data["tick"]) ? (int) $data["tick"] : null,
+			"chunk_x" => isset($data["chunk_x"]) && is_int($data["chunk_x"]) ? $data["chunk_x"] : (isset($data["chunk_x"]) && is_numeric($data["chunk_x"]) ? (int) $data["chunk_x"] : null),
+			"chunk_z" => isset($data["chunk_z"]) && is_int($data["chunk_z"]) ? $data["chunk_z"] : (isset($data["chunk_z"]) && is_numeric($data["chunk_z"]) ? (int) $data["chunk_z"] : null),
+		];
+	}
+
 	private static function createDB(string $path) : \LevelDB{
 		return new \LevelDB(Path::join($path, "db"), [
 			"compression" => LEVELDB_ZLIB_RAW_COMPRESSION,
@@ -200,34 +272,49 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 				throw new CorruptedChunkException("Invalid blockstate NBT at offset $i in paletted storage: " . $e->getMessage(), 0, $e);
 			}
 
-			//TODO: remember data for unknown states so we can implement them later
 			try{
 				$blockStateData = $this->blockDataUpgrader->upgradeBlockStateNbt($blockStateNbt);
 			}catch(BlockStateDeserializeException $e){
-				//while not ideal, this is not a fatal error
+				//while not ideal, this is not a fatal error — preserve raw NBT when possible
 				$errorMessage = "Upgrade error: " . $e->getMessage() . ", NBT: " . $blockStateNbt->toString();
 				$blockDecodeErrors[$errorMessage][] = $i;
-				$palette[] = $this->blockStateDeserializer->deserialize(GlobalBlockStateHandlers::getUnknownBlockStateData());
+				try{
+					$preserved = BlockStateData::fromNbt($blockStateNbt);
+					$palette[] = UnknownBlockStateStore::register($preserved);
+				}catch(\Throwable){
+					$palette[] = $this->blockStateDeserializer->deserialize(GlobalBlockStateHandlers::getUnknownBlockStateData());
+				}
 				continue;
 			}
 			try{
 				$palette[] = $this->blockStateDeserializer->deserialize($blockStateData);
 			}catch(UnsupportedBlockStateException $e){
 				$blockDecodeErrors[$e->getMessage()][] = $i;
-				$palette[] = $this->blockStateDeserializer->deserialize(GlobalBlockStateHandlers::getUnknownBlockStateData());
+				$palette[] = UnknownBlockStateStore::register($blockStateData);
 			}catch(BlockStateDeserializeException $e){
 				$errorMessage = "Deserialize error: " . $e->getMessage() . ", NBT: " . $blockStateNbt->toString();
 				$blockDecodeErrors[$errorMessage][] = $i;
-				$palette[] = $this->blockStateDeserializer->deserialize(GlobalBlockStateHandlers::getUnknownBlockStateData());
+				$palette[] = UnknownBlockStateStore::register($blockStateData);
 			}
 		}
 
 		if(count($blockDecodeErrors) > 0){
 			$finalErrors = [];
+			$onlyUnknownIds = true;
 			foreach(Utils::promoteKeys($blockDecodeErrors) as $errorMessage => $paletteOffsets){
 				$finalErrors[] = "$errorMessage (palette offsets: " . implode(", ", $paletteOffsets) . ")";
+				// Unknown IDs are preserved via UnknownBlockStateStore — expected for newer Bedrock blocks
+				// (e.g. firefly_bush, pointed_dripstone) not yet implemented as VanillaBlocks.
+				if(!str_starts_with($errorMessage, "Unknown block ID ")){
+					$onlyUnknownIds = false;
+				}
 			}
-			$logger->error("Errors decoding blocks:\n - " . implode("\n - ", $finalErrors));
+			$message = "Errors decoding blocks:\n - " . implode("\n - ", $finalErrors);
+			if($onlyUnknownIds){
+				$logger->debug($message);
+			}else{
+				$logger->error($message);
+			}
 		}
 
 		//TODO: exceptions
@@ -804,6 +891,32 @@ class LevelDB extends BaseWorldProvider implements WritableWorldProvider{
 		$write->delete($index . ChunkDataKey::LEGACY_TERRAIN);
 
 		$this->db->write($write);
+		$this->touchLevelDbSidecar($chunkX, $chunkZ);
+	}
+
+
+	/**
+	 * Best-effort durable marker after LevelDB batch writes (extension has no fsync API).
+	 * Payload is JSON with unix time, optional server tick, and last written chunk coords.
+	 */
+	private function touchLevelDbSidecar(int $chunkX, int $chunkZ) : void{
+		if(!self::$levelDbSidecarEnabled){
+			return;
+		}
+		try{
+			$payload = json_encode([
+				"unix" => time(),
+				"tick" => \pocketmine\Server::getInstance()->getTick(),
+				"chunk_x" => $chunkX,
+				"chunk_z" => $chunkZ,
+			], JSON_THROW_ON_ERROR);
+			Filesystem::safeFilePutContents(
+				Path::join($this->getPath(), "db", "LAST_FLUSH"),
+				$payload
+			);
+		}catch(\Throwable){
+			// best-effort
+		}
 	}
 
 	/**

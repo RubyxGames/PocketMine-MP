@@ -31,6 +31,7 @@ use pocketmine\data\bedrock\block\convert\UnsupportedBlockStateException;
 use pocketmine\data\bedrock\item\SavedItemData as Data;
 use pocketmine\item\Durable;
 use pocketmine\item\Item;
+use pocketmine\item\UnknownItem;
 use pocketmine\nbt\NbtException;
 use function min;
 
@@ -79,8 +80,8 @@ final class ItemDeserializer{
 			//TODO: this is rough duct tape; we need a better way to deal with this
 			try{
 				$block = $this->blockStateDeserializer->deserialize($blockData);
-			}catch(UnsupportedBlockStateException $e){
-				throw new UnsupportedItemTypeException($e->getMessage(), 0, $e);
+			}catch(UnsupportedBlockStateException){
+				return new UnknownItem($data);
 			}catch(BlockStateDeserializeException $e){
 				throw new ItemTypeDeserializeException("Failed to deserialize item data: " . $e->getMessage(), 0, $e);
 			}
@@ -90,7 +91,7 @@ final class ItemDeserializer{
 		}
 		$id = $data->getName();
 		if(!isset($this->deserializers[$id])){
-			throw new UnsupportedItemTypeException("No deserializer found for ID $id");
+			return new UnknownItem($data);
 		}
 
 		return ($this->deserializers[$id])($data);

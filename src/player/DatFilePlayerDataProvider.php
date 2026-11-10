@@ -32,6 +32,9 @@ use pocketmine\utils\Filesystem;
 use pocketmine\utils\Utils;
 use Symfony\Component\Filesystem\Path;
 use function file_exists;
+use function is_dir;
+use function mkdir;
+use function preg_match;
 use function rename;
 use function strtolower;
 use function zlib_decode;
@@ -40,6 +43,7 @@ use const ZLIB_ENCODING_GZIP;
 
 /**
  * Stores player data in a single .dat file per player. Each file is gzipped big-endian NBT.
+ * When an XUID is provided, prefers players/xuid/<xuid>.dat and dual-writes name + xuid files on save.
  */
 final class DatFilePlayerDataProvider implements PlayerDataProvider{
 
@@ -51,23 +55,54 @@ final class DatFilePlayerDataProvider implements PlayerDataProvider{
 		return Path::join($this->path, strtolower($username) . '.dat');
 	}
 
-	private function handleCorruptedPlayerData(string $name) : void{
-		$path = $this->getPlayerDataPath($name);
+	private function getXuidDataPath(string $xuid) : string{
+		return Path::join($this->path, 'xuid', $xuid . '.dat');
+	}
+
+	private function normalizeXuid(?string $xuid) : ?string{
+		if($xuid === null || $xuid === ""){
+			return null;
+		}
+		if(preg_match('/^\d+$/', $xuid) !== 1){
+			return null;
+		}
+		return $xuid;
+	}
+
+	private function handleCorruptedPlayerData(string $path) : void{
 		rename($path, $path . '.bak');
 	}
 
-	public function hasData(string $name) : bool{
+	public function hasData(string $name, ?string $xuid = null) : bool{
+		$xuid = $this->normalizeXuid($xuid);
+		if($xuid !== null && file_exists($this->getXuidDataPath($xuid))){
+			return true;
+		}
 		return file_exists($this->getPlayerDataPath($name));
 	}
 
-	public function loadData(string $name) : ?CompoundTag{
+	public function loadData(string $name, ?string $xuid = null) : ?CompoundTag{
 		$name = strtolower($name);
-		$path = $this->getPlayerDataPath($name);
+		$xuid = $this->normalizeXuid($xuid);
 
-		if(!file_exists($path)){
-			return null;
+		$path = null;
+		if($xuid !== null){
+			$xuidPath = $this->getXuidDataPath($xuid);
+			if(file_exists($xuidPath)){
+				$path = $xuidPath;
+			}
+		}
+		if($path === null){
+			$path = $this->getPlayerDataPath($name);
+			if(!file_exists($path)){
+				return null;
+			}
 		}
 
+		return $this->readFile($path, $name);
+	}
+
+	private function readFile(string $path, string $label) : CompoundTag{
 		try{
 			$contents = Filesystem::fileGetContents($path);
 		}catch(\RuntimeException $e){
@@ -76,25 +111,40 @@ final class DatFilePlayerDataProvider implements PlayerDataProvider{
 		try{
 			$decompressed = ErrorToExceptionHandler::trapAndRemoveFalse(fn() => zlib_decode($contents));
 		}catch(\ErrorException $e){
-			$this->handleCorruptedPlayerData($name);
-			throw new PlayerDataLoadException("Failed to decompress raw player data for \"$name\": " . $e->getMessage(), 0, $e);
+			$this->handleCorruptedPlayerData($path);
+			throw new PlayerDataLoadException("Failed to decompress raw player data for \"$label\": " . $e->getMessage(), 0, $e);
 		}
 
 		try{
 			return (new BigEndianNbtSerializer())->read($decompressed)->mustGetCompoundTag();
-		}catch(NbtDataException $e){ //corrupt data
-			$this->handleCorruptedPlayerData($name);
-			throw new PlayerDataLoadException("Failed to decode NBT data for \"$name\": " . $e->getMessage(), 0, $e);
+		}catch(NbtDataException $e){
+			$this->handleCorruptedPlayerData($path);
+			throw new PlayerDataLoadException("Failed to decode NBT data for \"$label\": " . $e->getMessage(), 0, $e);
 		}
 	}
 
-	public function saveData(string $name, CompoundTag $data) : void{
+	public function saveData(string $name, CompoundTag $data, ?string $xuid = null) : void{
 		$nbt = new BigEndianNbtSerializer();
 		$contents = Utils::assumeNotFalse(zlib_encode($nbt->write(new TreeRoot($data)), ZLIB_ENCODING_GZIP), "zlib_encode() failed unexpectedly");
+
+		$namePath = $this->getPlayerDataPath($name);
 		try{
-			Filesystem::safeFilePutContents($this->getPlayerDataPath($name), $contents);
+			Filesystem::safeFilePutContents($namePath, $contents);
 		}catch(\RuntimeException $e){
 			throw new PlayerDataSaveException("Failed to write player data file: " . $e->getMessage(), 0, $e);
+		}
+
+		$xuid = $this->normalizeXuid($xuid);
+		if($xuid !== null){
+			$xuidDir = Path::join($this->path, 'xuid');
+			if(!is_dir($xuidDir) && !@mkdir($xuidDir, 0777, true) && !is_dir($xuidDir)){
+				throw new PlayerDataSaveException("Failed to create xuid player data directory");
+			}
+			try{
+				Filesystem::safeFilePutContents($this->getXuidDataPath($xuid), $contents);
+			}catch(\RuntimeException $e){
+				throw new PlayerDataSaveException("Failed to write xuid player data file: " . $e->getMessage(), 0, $e);
+			}
 		}
 	}
 }

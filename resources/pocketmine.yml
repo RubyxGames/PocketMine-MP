@@ -87,10 +87,61 @@ network:
   #DEPRECATED: This setting will be removed in a future version once the RakNet support is removed.
   enable-encryption: true
 
+  # Adaptive QoS: temporarily lower view distance for high-latency players (see docs/adaptive-qos.md).
+  adaptive-qos:
+    enabled: false
+    ping-soft-ms: 150
+    ping-hard-ms: 300
+    recover-ms: 100
+    soft-view-distance: 6
+    hard-view-distance: 4
+    min-view-distance: 3
+    check-interval-ticks: 40
+
+# Graceful stop: refuse joins, wait up to N seconds, then forceShutdown. 0 = immediate.
+shutdown:
+  drain-seconds: 10
+
+# Soft chat/command rate limits (no kick). See docs/ops.md.
+abuse-limits:
+  chat:
+    enabled: true
+    max-per-second: 2
+    burst: 4
+  commands:
+    enabled: true
+    max-per-second: 4
+    burst: 8
+
+# Data-Driven UI (Bedrock 1.26+). See docs/plugin-api-ddui.md and docs/DDUI_WIRE_CONTRACT.md.
+ddui:
+  enabled: true
+  # Delay before opening a new DDUI screen after closing another (avoids client USER_BUSY).
+  replace-delay-ticks: 20
+  # Auto-close server-side tracking after this many ticks (0 = disabled).
+  session-timeout-ticks: 6000
+  max-inbound-updates-per-tick: 32
+  max-outbound-updates-per-tick: 64
+  # Theme API: alias → styleId from resource pack ddui/styling/*.json (see docs/DDUI_THEMING.md).
+  default-theme: rubyx:classic
+  themes:
+    rubyx:classic:
+      style-id: ""
+
+# Session recording (JSONL gameplay/event log). See docs/session-recording.md.
+session-recording:
+  enabled: false
+  auto-record-all: false
+  directory: session_recordings
+  move-sample-ticks: 5
+  record-packet-ids: false
+  max-file-mb: 64
+
 transport:
-  #Network transport(s) used for player connections. Accepts a comma-separated list (e.g. raknet,nethernet), up to 8 entries.
+  #Network transport(s) used for player connections. Accepts a comma-separated list (e.g. nethernet,raknet), up to 8 entries.
   #Built-in options: raknet, nethernet. Plugins may register additional transports.
-  name: nethernet,raknet
+  #Default is NetherNet-only. Use "nethernet,raknet" while older clients still need RakNet.
+  name: nethernet
   #Settings for the NetherNet (WebRTC) transport.
   nethernet:
     #Path to the persistent identity key, relative to the data directory.
@@ -125,12 +176,14 @@ transport:
 
     #STUN/TURN ICE servers for NAT traversal and relay.
     #Unreachable servers will delay connection establishment until candidate gathering times out.
+    #A public STUN server is enabled by default so players behind NAT can often connect without a private TURN.
+    #For strict CGNAT/symmetric NAT, add a TURN server (credentials required).
     ice-servers:
+      - type: stun
+        host: stun.l.google.com
+        port: 19302
       #port defaults to 3478 if omitted.
-      #Example:
-      #- type: stun
-      #  host: stun.example.com
-      #  port: 3478
+      #Example TURN:
       #- type: turn
       #  host: turn.example.com
       #  port: 3478
@@ -147,12 +200,13 @@ transport:
       #Only modify this when behind a reverse proxy that forwards signaling traffic to a custom port.
       port: 0
 
-      #TLS encryption for the HTTP signaling endpoint. Plain HTTP requests are redirected to HTTPS.
-      #Leave certificate and key empty to serve plain HTTP only. Paths are relative to the data directory.
+      #TLS for the HTTP signaling endpoint (plain HTTP is redirected to HTTPS when set).
+      #Leave certificate and key empty for plain HTTP (typical behind a TLS reverse proxy).
+      #Paths are relative to the data directory, e.g. nethernet-signaling.crt / nethernet-signaling.key
       tls:
-        #Path to PEM certificate or certificate chain file.
+        #Path to PEM certificate or certificate chain file (required together with key).
         certificate:
-        #Path to PEM private key file.
+        #Path to PEM private key file (required together with certificate).
         key:
         #Optional private key passphrase, or file:<path> to read from a file.
         passphrase:
@@ -181,10 +235,34 @@ player:
   #If true, checks that joining players' Xbox user ID (XUID) match what was previously recorded.
   #This also prevents non-XBL players using XBL players' usernames to steal their data on servers with xbox-auth=off.
   verify-xuid: true
+  # Client movement safety (not full anti-cheat). See docs/ops.md.
+  movement:
+    enabled: true
+    max-blocks-per-move: 15
+    max-blocks-per-tick: 10.0
+    # Also send CorrectPlayerMovePredictionPacket on rubberband (not full prediction AC)
+    send-prediction-correction: true
 
 level-settings:
   #The default format that worlds will use when created
   default-format: leveldb
+
+# Durable saves for small files / optional region fsync. See docs/ops.md.
+world:
+  save:
+    fsync: true
+    region-fsync: false
+    leveldb-sidecar: true
+  light:
+    # true = coalesce light recalcs until end of world tick (default)
+    # false = execute immediately after each updateAllLight (more responsive, more CPU)
+    defer-updates: true
+
+# Prometheus-style metrics (file and/or scrape). See docs/ops.md.
+metrics:
+  enabled: false
+  file: true
+  bind: "" # e.g. 127.0.0.1:9090
 
 chunk-sending:
   #To change server normal render distance, change view-distance in server.properties.
@@ -204,6 +282,13 @@ chunk-ticking:
     #- grass
     #- ice
     #- fire
+  #Unused chunk unload (saves RAM; may add reload latency when players return). See docs/multiworld.md.
+  unload:
+    enabled: true
+    #Max chunks unloaded per world tick from the idle queue
+    max-chunks-per-tick: 16
+    #Ticks an unused chunk must stay idle before it becomes eligible (~10s at 20 TPS)
+    idle-ticks: 200
 
 chunk-generation:
   #Max. amount of chunks in the waiting queue to be populated
@@ -289,7 +374,13 @@ worlds:
   # preset: 2;bedrock,59xstone,3xdirt,grass;1
 
 plugins:
+  security-scan: true
+  security-scan-mode: warn
   #Setting this to true will cause the legacy structure to be used where plugin data is placed inside the --plugins dir.
   #False will place plugin data under plugin_data under --data.
   #This option exists for backwards compatibility with existing installations.
   legacy-data-dir: false
+  # /plugin install <https-url> downloads a .phar or folder-plugin .zip into plugins/ (restart required to load).
+  install:
+    enabled: true
+    max-mb: 32
