@@ -32,6 +32,8 @@ use function str_repeat;
 final class VersionInfo{
 	public const NAME = "RubyxGames";
 	public const BASE_VERSION = "1.0.0";
+	/** Plugin API (plugin.yml `api: 5.x`); not the RubyxGames distribution version. */
+	public const PLUGIN_API_VERSION = "5.51.2";
 	public const IS_DEVELOPMENT_BUILD = false;
 	public const BUILD_CHANNEL = "stable";
 	public const GITHUB_URL = "https://github.com/RubyxGames";
