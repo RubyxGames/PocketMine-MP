@@ -27,7 +27,9 @@ use pocketmine\utils\Utils;
 use function fclose;
 use function fgets;
 use function fopen;
+use function getenv;
 use function is_resource;
+use function is_string;
 use function stream_select;
 use function trim;
 use function usleep;
@@ -43,6 +45,17 @@ final class ConsoleReader{
 	private function initStdin() : void{
 		if(is_resource($this->stdin)){
 			fclose($this->stdin);
+		}
+
+		// Prefer dedicated FIFO (docker/rb) so the main server process can keep stdin on /dev/null
+		// and avoid multi-reader races on console.in.
+		$consoleIn = getenv('POCKETMINE_CONSOLE_IN');
+		if(is_string($consoleIn) && $consoleIn !== ''){
+			$handle = @fopen($consoleIn, "r");
+			if(is_resource($handle)){
+				$this->stdin = $handle;
+				return;
+			}
 		}
 
 		$this->stdin = Utils::assumeNotFalse(fopen("php://stdin", "r"), "Opening stdin should never fail");

@@ -31,6 +31,7 @@ use pocketmine\network\mcpe\cache\model\VoxelShapesData;
 use pocketmine\network\mcpe\protocol\AvailableActorIdentifiersPacket;
 use pocketmine\network\mcpe\protocol\BiomeDefinitionListPacket;
 use pocketmine\network\mcpe\protocol\JigsawStructureDataPacket;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\serializer\NetworkNbtSerializer;
 use pocketmine\network\mcpe\protocol\types\biome\BiomeDefinitionEntry;
 use pocketmine\network\mcpe\protocol\types\BlockPaletteEntry;
@@ -53,7 +54,7 @@ class StaticPacketCache{
 	/**
 	 * @phpstan-return CacheableNbt<CompoundTag>
 	 */
-	private static function loadCompoundFromFile(string $filePath) : CacheableNbt{
+	protected static function loadCompoundFromFile(string $filePath) : CacheableNbt{
 		return new CacheableNbt((new NetworkNbtSerializer())->read(Filesystem::fileGetContents($filePath))->mustGetCompoundTag());
 	}
 
@@ -86,6 +87,10 @@ class StaticPacketCache{
 					$biomeDefinition->id,
 					$biomeDefinition->temperature,
 					$biomeDefinition->downfall,
+					$biomeDefinition->redSporeDensity,
+					$biomeDefinition->blueSporeDensity,
+					$biomeDefinition->ashDensity,
+					$biomeDefinition->whiteAshDensity,
 					$biomeDefinition->foliageSnow,
 					$biomeDefinition->depth,
 					$biomeDefinition->scale,
@@ -167,6 +172,7 @@ class StaticPacketCache{
 	private static function make() : self{
 		return new self(
 			BiomeDefinitionListPacket::fromDefinitions(self::loadBiomeDefinitionModel(BedrockDataFiles::BIOME_DEFINITIONS_JSON)),
+			BiomeDefinitionListPacket::createLegacy(self::loadCompoundFromFile(BedrockDataFiles::BIOME_DEFINITIONS_NBT)),
 			AvailableActorIdentifiersPacket::create(self::loadCompoundFromFile(BedrockDataFiles::ENTITY_IDENTIFIERS_NBT)),
 			JigsawStructureDataPacket::create(self::loadCompoundFromFile(BedrockDataFiles::JIGSAW_STRUCTURES_DATA_NBT)),
 			self::buildVoxelShapesPacket(self::loadVoxelShapesModel(BedrockDataFiles::VOXEL_SHAPES_JSON)),
@@ -177,6 +183,7 @@ class StaticPacketCache{
 	/** @phpstan-param list<BlockPaletteEntry> $blockPaletteEntries */
 	public function __construct(
 		private BiomeDefinitionListPacket $biomeDefs,
+		private BiomeDefinitionListPacket $legacyBiomeDefs,
 		private AvailableActorIdentifiersPacket $availableActorIdentifiers,
 		private JigsawStructureDataPacket $jigsawStructureData,
 		private VoxelShapesPacket $voxelShapes,
@@ -184,8 +191,8 @@ class StaticPacketCache{
 	){
 	}
 
-	public function getBiomeDefs() : BiomeDefinitionListPacket{
-		return $this->biomeDefs;
+	public function getBiomeDefs(int $protocolId) : BiomeDefinitionListPacket{
+		return $protocolId >= ProtocolInfo::PROTOCOL_1_21_80 ? $this->biomeDefs : $this->legacyBiomeDefs;
 	}
 
 	public function getAvailableActorIdentifiers() : AvailableActorIdentifiersPacket{

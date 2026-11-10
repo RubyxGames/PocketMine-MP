@@ -26,6 +26,7 @@ namespace pocketmine\world\generator;
 use pocketmine\math\Vector3;
 use pocketmine\utils\SingletonTrait;
 use pocketmine\utils\Utils;
+use pocketmine\world\generator\ender\EnderGenerator;
 use pocketmine\world\generator\hell\Nether;
 use pocketmine\world\generator\normal\Normal;
 use function array_keys;
@@ -57,6 +58,14 @@ final class GeneratorManager{
 		$this->addGenerator(Nether::class, "nether", fn() => null);
 		$this->addAlias("nether", "hell");
 		$this->addGenerator(VoidGenerator::class, "void", fn() => null, fast: true, spawnPositionProvider: fn(int $seed) => new Vector3(0, -63, 0));
+		$this->addGenerator(SkyBlockGenerator::class, "skyblock", fn() => null, fast: true, spawnPositionProvider: fn(int $seed) => new Vector3(256, 70, 256));
+		$this->addAlias("skyblock", "sb");
+		// MultiWorld-compatible End terrain (lite); spawn near island center
+		$this->addGenerator(EnderGenerator::class, "ender", fn() => null, spawnPositionProvider: fn(int $seed) => new Vector3(0, 72, 0));
+		$this->addAlias("ender", "ender_mw");
+		$this->addAlias("ender", "end");
+		// normal_mw stays an alias of core normal (custom MW NormalGenerator not ported)
+		$this->addAlias("normal", "normal_mw");
 	}
 
 	/**

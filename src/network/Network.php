@@ -147,7 +147,10 @@ class Network{
 	}
 
 	/**
-	 * Registers a transport under the given name.
+	 * Registers a transport under the given name (case-insensitive).
+	 *
+	 * This is the supported plugin API for custom connection types. Register before network startup; enable via
+	 * `transport.name` in pocketmine.yml (comma-separated) or by calling {@link activateTransport()}.
 	 *
 	 * @throws \InvalidArgumentException if a transport is already registered under the same name
 	 */
@@ -161,6 +164,8 @@ class Network{
 
 	/**
 	 * Returns the transport registered under the given name, or null if there is none.
+	 *
+	 * Plugin API: use this to check whether a named transport (built-in or custom) is available.
 	 */
 	public function getTransport(string $name) : ?Transport{
 		return $this->transports[strtolower(trim($name))] ?? null;
@@ -168,6 +173,8 @@ class Network{
 
 	/**
 	 * Returns all registered transports, active or not, indexed by name.
+	 *
+	 * Plugin API for capability checks (e.g. "is NetherNet registered?").
 	 *
 	 * @return Transport[]
 	 * @phpstan-return array<string, Transport>
@@ -178,7 +185,8 @@ class Network{
 
 	/**
 	 * Marks a registered transport to be started on network startup. This must be called before active transports are
-	 * started.
+	 * started. Normally the server activates names listed in `transport.name`; plugins may activate extra transports
+	 * they registered if they intentionally bypass the config list.
 	 *
 	 * @throws \InvalidArgumentException if no transport is registered under the given name
 	 * @throws \LogicException if the active transports have already been started
@@ -195,6 +203,10 @@ class Network{
 	}
 
 	/**
+	 * Returns transports that will be / have been started for this process, indexed by name.
+	 *
+	 * Plugin API: prefer this over {@link getTransports()} when checking what players can actually connect with.
+	 *
 	 * @return Transport[]
 	 * @phpstan-return array<string, Transport>
 	 */

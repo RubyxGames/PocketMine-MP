@@ -27,6 +27,7 @@ use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\Binary;
 use pocketmine\utils\BinaryDataException;
 use pocketmine\utils\BinaryStream;
+use pocketmine\utils\Filesystem;
 use pocketmine\world\format\ChunkException;
 use pocketmine\world\format\io\exception\CorruptedChunkException;
 use function assert;
@@ -34,11 +35,13 @@ use function ceil;
 use function chr;
 use function clearstatcache;
 use function fclose;
+use function fflush;
 use function file_exists;
 use function filesize;
 use function fopen;
 use function fread;
 use function fseek;
+use function fsync;
 use function ftruncate;
 use function fwrite;
 use function is_resource;
@@ -231,6 +234,7 @@ class RegionLoader{
 		/* write the chunk data into the chosen location */
 		fseek($this->filePointer, $newLocation->getFirstSector() << 12);
 		fwrite($this->filePointer, str_pad(Binary::writeInt($length) . chr(self::COMPRESSION_ZLIB) . $chunkData, $newSize << 12, "\x00", STR_PAD_RIGHT));
+		fflush($this->filePointer);
 
 		/*
 		 * update the file header - we do this after writing the main data, so that if a failure occurs while writing,
@@ -285,6 +289,10 @@ class RegionLoader{
 	 */
 	public function close() : void{
 		if(is_resource($this->filePointer)){
+			fflush($this->filePointer);
+			if(Filesystem::isRegionFsyncEnabled()){
+				@fsync($this->filePointer);
+			}
 			fclose($this->filePointer);
 		}
 	}
@@ -379,6 +387,7 @@ class RegionLoader{
 		fwrite($this->filePointer, Binary::writeInt($entry !== null ? ($entry->getFirstSector() << 8) | $entry->getSectorCount() : 0), 4);
 		fseek($this->filePointer, 4096 + ($index << 2));
 		fwrite($this->filePointer, Binary::writeInt($entry !== null ? $entry->getTimestamp() : 0), 4);
+		fflush($this->filePointer);
 		clearstatcache(false, $this->filePath);
 	}
 

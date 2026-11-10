@@ -1,0 +1,145 @@
+<?php
+
+namespace pocketmine\world\worldedit\task\editing;
+
+use Generator;
+use InvalidArgumentException;
+use pocketmine\world\worldedit\math\OffGridBlockVector;
+use pocketmine\world\worldedit\selection\BlockListSelection;
+use pocketmine\world\worldedit\selection\constructor\RawShapeConstructor;
+use pocketmine\world\worldedit\selection\constructor\ShapeConstructor;
+use pocketmine\world\worldedit\selection\DynamicBlockListSelection;
+use pocketmine\world\worldedit\selection\identifier\BlockListSelectionIdentifier;
+use pocketmine\world\worldedit\selection\StaticBlockListSelection;
+use pocketmine\world\worldedit\task\EditThreadExclusive;
+use pocketmine\world\worldedit\utils\EntityUtils;
+use pocketmine\world\worldedit\utils\ExtendedBinaryStream;
+use pocketmine\world\worldedit\utils\TileUtils;
+use pocketmine\world\worldedit\world\HeightMapCache;
+use pocketmine\block\Block;
+use pocketmine\block\BlockTypeIds;
+
+class DynamicPasteTask extends SelectionEditTask
+{
+	use EditThreadExclusive;
+
+	public const MODE_REPLACE_ALL = 0; //Replace everything with the selection
+	public const MODE_REPLACE_AIR = 1; //Replace air with the selection
+	public const MODE_ONLY_SOLID = 2; //Only paste solid blocks
+	public const MODE_REPLACE_SOLID = 3; //Replace solid blocks with solid blocks from the selection
+
+	private DynamicBlockListSelection $cache;
+
+	/**
+	 * @param string                       $world
+	 * @param BlockListSelectionIdentifier $selection
+	 * @param OffGridBlockVector           $position
+	 * @param int                          $mode
+	 */
+	public function __construct(private string $world, BlockListSelectionIdentifier $selection, private OffGridBlockVector $position, private int $mode = self::MODE_REPLACE_ALL)
+	{
+		parent::__construct($selection);
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getTaskName(): string
+	{
+		return "dynamic_paste";
+	}
+
+	/**
+	 * @return DynamicBlockListSelection
+	 */
+	public function getSelection(): DynamicBlockListSelection
+	{
+		if (!isset($this->cache)) {
+			$sel = parent::getSelection();
+			if (!$sel instanceof DynamicBlockListSelection) {
+				throw new InvalidArgumentException("Selection must be a dynamic block list");
+			}
+			$sel->setPoint($this->position->offset($sel->getPoint())->diff(OffGridBlockVector::zero()));
+			$this->cache = $sel;
+		}
+		return $this->cache;
+	}
+
+	/**
+	 * @param EditTaskHandler $handler
+	 * @return Generator<ShapeConstructor>
+	 */
+	public function prepareConstructors(EditTaskHandler $handler): Generator
+	{
+		$selection = $this->getSelection();
+		$place = $selection->getPoint();
+		$ox = $place->x;
+		$oy = $place->y;
+		$oz = $place->z;
+		$ignore = HeightMapCache::getIgnore();
+		yield from match ($this->mode) {
+			self::MODE_REPLACE_ALL => $selection->asShapeConstructors(function (int $x, int $y, int $z) use ($ox, $oy, $oz, $handler, $selection): void {
+				$block = $selection->getIterator()->getBlock($x - $ox, $y - $oy, $z - $oz);
+				if ($block !== 0) {
+					$handler->changeBlock($x, $y, $z, $block);
+				}
+			}, $this->context),
+			self::MODE_REPLACE_AIR => $selection->asShapeConstructors(function (int $x, int $y, int $z) use ($ox, $oy, $oz, $ignore, $handler, $selection): void {
+				$block = $selection->getIterator()->getBlock($x - $ox, $y - $oy, $z - $oz);
+				if ($block !== 0 && $block >> Block::INTERNAL_STATE_DATA_BITS !== BlockTypeIds::AIR && in_array($handler->getBlock($x, $y, $z) >> Block::INTERNAL_STATE_DATA_BITS, $ignore, true)) {
+					$handler->changeBlock($x, $y, $z, $block);
+				}
+			}, $this->context),
+			self::MODE_ONLY_SOLID => $selection->asShapeConstructors(function (int $x, int $y, int $z) use ($ox, $oy, $oz, $ignore, $handler, $selection): void {
+				$block = $selection->getIterator()->getBlock($x - $ox, $y - $oy, $z - $oz);
+				if ($block !== 0 && (!in_array($block >> Block::INTERNAL_STATE_DATA_BITS, $ignore, true) || ($block >> Block::INTERNAL_STATE_DATA_BITS !== BlockTypeIds::AIR && $handler->getBlock($x, $y, $z) >> Block::INTERNAL_STATE_DATA_BITS === BlockTypeIds::AIR))) {
+					$handler->changeBlock($x, $y, $z, $block);
+				}
+			}, $this->context),
+			self::MODE_REPLACE_SOLID => $selection->asShapeConstructors(function (int $x, int $y, int $z) use ($ox, $oy, $oz, $ignore, $handler, $selection): void {
+				$block = $selection->getIterator()->getBlock($x - $ox, $y - $oy, $z - $oz);
+				if ($block !== 0 && !in_array($block >> Block::INTERNAL_STATE_DATA_BITS, $ignore, true) && !in_array($handler->getBlock($x, $y, $z) >> Block::INTERNAL_STATE_DATA_BITS, $ignore, true)) {
+					$handler->changeBlock($x, $y, $z, $block);
+				}
+			}, $this->context),
+			default => throw new InvalidArgumentException("Invalid mode $this->mode"),
+		};
+		yield new RawShapeConstructor(function (int $chunk) use ($ox, $oy, $oz, $handler, $selection): void {
+			foreach ($selection->getOffsetTiles($chunk) as $tile) {
+				$handler->addTile(TileUtils::offsetCompound($tile, $ox, $oy, $oz));
+			}
+			foreach ($selection->getOffsetEntities($chunk) as $entity) {
+				$handler->addEntity(EntityUtils::offsetCompound($entity, (float) $ox, (float) $oy, (float) $oz));
+			}
+		}, false);
+	}
+
+	/**
+	 * @return BlockListSelection
+	 */
+	public function createUndoBlockList(): BlockListSelection
+	{
+		return new StaticBlockListSelection($this->getTargetWorld(), $this->getSelection()->getPos1()->offset($this->getSelection()->getPoint()), $this->getSelection()->getPos2()->offset($this->getSelection()->getPoint()));
+	}
+
+	public function getTargetWorld(): string
+	{
+		return $this->world;
+	}
+
+	public function putData(ExtendedBinaryStream $stream): void
+	{
+		parent::putData($stream);
+		$stream->putInt($this->mode);
+		$stream->putString($this->world);
+		$stream->putBlockVector($this->position);
+	}
+
+	public function parseData(ExtendedBinaryStream $stream): void
+	{
+		parent::parseData($stream);
+		$this->mode = $stream->getInt();
+		$this->world = $stream->getString();
+		$this->position = $stream->getOffGridBlockVector();
+	}
+}

@@ -57,8 +57,10 @@ use pocketmine\network\mcpe\compression\Compressor;
 use pocketmine\network\mcpe\compression\ZlibCompressor;
 use pocketmine\network\mcpe\convert\TypeConverter;
 use pocketmine\network\mcpe\encryption\EncryptionContext;
+use pocketmine\network\mcpe\EntityEventBroadcaster;
 use pocketmine\network\mcpe\nethernet\NetherNetTransport;
 use pocketmine\network\mcpe\NetworkSession;
+use pocketmine\network\mcpe\PacketBroadcaster;
 use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\types\CompressionAlgorithm;
 use pocketmine\network\mcpe\raklib\RakLibTransport;
@@ -80,12 +82,14 @@ use pocketmine\player\PlayerDataLoadException;
 use pocketmine\player\PlayerDataProvider;
 use pocketmine\player\PlayerDataSaveException;
 use pocketmine\player\PlayerInfo;
+use pocketmine\plugin\FolderPluginLoader;
 use pocketmine\plugin\PharPluginLoader;
 use pocketmine\plugin\PluginEnableOrder;
 use pocketmine\plugin\PluginGraylist;
 use pocketmine\plugin\PluginManager;
 use pocketmine\plugin\PluginOwned;
 use pocketmine\plugin\ScriptPluginLoader;
+use pocketmine\plugin\ServerCapabilities;
 use pocketmine\promise\Promise;
 use pocketmine\promise\PromiseResolver;
 use pocketmine\resourcepacks\ResourcePackManager;
@@ -108,6 +112,7 @@ use pocketmine\utils\Internet;
 use pocketmine\utils\MainLogger;
 use pocketmine\utils\NotCloneable;
 use pocketmine\utils\NotSerializable;
+use pocketmine\utils\ObjectSet;
 use pocketmine\utils\Process;
 use pocketmine\utils\SignalHandler;
 use pocketmine\utils\Terminal;
@@ -143,6 +148,7 @@ use function filemtime;
 use function fopen;
 use function get_class;
 use function gettype;
+use function implode;
 use function ini_set;
 use function is_array;
 use function is_dir;
@@ -238,8 +244,16 @@ class Server{
 	private bool $isRunning = true;
 
 	private bool $hasStopped = false;
+	private bool $hasForceShutdown = false;
+	private bool $draining = false;
+	private float $drainDeadline = 0.0;
+	private int $shutdownDrainSeconds = 10;
+	private bool $tickFrozen = false;
+	private int $pendingTickSteps = 0;
 
 	private PluginManager $pluginManager;
+
+	private ServerCapabilities $capabilities;
 
 	private float $profilingTickRate = self::TARGET_TICKS_PER_SECOND;
 
@@ -272,6 +286,19 @@ class Server{
 	private CraftingManager $craftingManager;
 
 	private ResourcePackManager $resourceManager;
+
+	private ?\pocketmine\network\qos\AdaptiveQosManager $adaptiveQosManager = null;
+
+	private ?\pocketmine\sessionrecord\SessionRecordingManager $sessionRecordingManager = null;
+
+	private ?\pocketmine\plugin\CorePluginHost $corePluginHost = null;
+
+	private \pocketmine\network\AbuseLimitsManager $abuseLimitsManager;
+
+	private bool $metricsEnabled = false;
+	private bool $metricsFileEnabled = true;
+	private ?\pocketmine\metrics\MetricsHttpListener $metricsHttpListener = null;
+	private \pocketmine\metrics\PrometheusTextRenderer $metricsRenderer;
 
 	private WorldManager $worldManager;
 
@@ -315,12 +342,47 @@ class Server{
 	 */
 	private array $broadcastSubscribers = [];
 
+	/** @var array<int, PacketBroadcaster> */
+	private array $packetBroadcasters = [];
+	/** @var array<string, EntityEventBroadcaster> */
+	private array $entityEventBroadcasters = [];
+
 	public function getName() : string{
 		return VersionInfo::NAME;
 	}
 
 	public function isRunning() : bool{
 		return $this->isRunning;
+	}
+
+	/**
+	 * True while graceful shutdown is refusing new joins and waiting for drain.
+	 */
+	public function isDraining() : bool{
+		return $this->draining;
+	}
+
+	public function isTickFrozen() : bool{
+		return $this->tickFrozen;
+	}
+
+	public function setTickFrozen(bool $frozen) : void{
+		$this->tickFrozen = $frozen;
+		if(!$frozen){
+			$this->pendingTickSteps = 0;
+		}
+	}
+
+	public function requestTickSteps(int $n) : void{
+		$this->pendingTickSteps = max(0, $n);
+	}
+
+	public function getPendingTickSteps() : int{
+		return $this->pendingTickSteps;
+	}
+
+	public function hasForceShutdown() : bool{
+		return $this->hasForceShutdown;
 	}
 
 	public function getPocketMineVersion() : string{
@@ -446,12 +508,32 @@ class Server{
 		return $this->pluginManager;
 	}
 
+	public function getCapabilities() : ServerCapabilities{
+		return $this->capabilities;
+	}
+
 	public function getCraftingManager() : CraftingManager{
 		return $this->craftingManager;
 	}
 
 	public function getResourcePackManager() : ResourcePackManager{
 		return $this->resourceManager;
+	}
+
+	public function getAdaptiveQosManager() : ?\pocketmine\network\qos\AdaptiveQosManager{
+		return $this->adaptiveQosManager;
+	}
+
+	public function getSessionRecordingManager() : ?\pocketmine\sessionrecord\SessionRecordingManager{
+		return $this->sessionRecordingManager;
+	}
+
+	public function getCorePluginScheduler() : \pocketmine\scheduler\TaskScheduler{
+		return $this->corePluginHost?->getScheduler() ?? throw new \LogicException("Server has not been started");
+	}
+
+	public function getAbuseLimitsManager() : \pocketmine\network\AbuseLimitsManager{
+		return $this->abuseLimitsManager;
 	}
 
 	public function getWorldManager() : WorldManager{
@@ -527,14 +609,14 @@ class Server{
 	/**
 	 * Returns whether the server has stored any saved data for this player.
 	 */
-	public function hasOfflinePlayerData(string $name) : bool{
-		return $this->playerDataProvider->hasData($name);
+	public function hasOfflinePlayerData(string $name, ?string $xuid = null) : bool{
+		return $this->playerDataProvider->hasData($name, $xuid);
 	}
 
-	public function getOfflinePlayerData(string $name) : ?CompoundTag{
-		return Timings::$syncPlayerDataLoad->time(function() use ($name) : ?CompoundTag{
+	public function getOfflinePlayerData(string $name, ?string $xuid = null) : ?CompoundTag{
+		return Timings::$syncPlayerDataLoad->time(function() use ($name, $xuid) : ?CompoundTag{
 			try{
-				return $this->playerDataProvider->loadData($name);
+				return $this->playerDataProvider->loadData($name, $xuid);
 			}catch(PlayerDataLoadException $e){
 				$this->logger->debug("Failed to load player data for $name: " . $e->getMessage());
 				$this->logger->error($this->language->translate(KnownTranslationFactory::pocketmine_data_playerCorrupted($name)));
@@ -543,7 +625,7 @@ class Server{
 		});
 	}
 
-	public function saveOfflinePlayerData(string $name, CompoundTag $nbtTag) : void{
+	public function saveOfflinePlayerData(string $name, CompoundTag $nbtTag, ?string $xuid = null) : void{
 		$ev = new PlayerDataSaveEvent($nbtTag, $name, $this->getPlayerExact($name));
 		if(!$this->shouldSavePlayerData()){
 			$ev->cancel();
@@ -552,9 +634,9 @@ class Server{
 		$ev->call();
 
 		if(!$ev->isCancelled()){
-			Timings::$syncPlayerDataSave->time(function() use ($name, $ev) : void{
+			Timings::$syncPlayerDataSave->time(function() use ($name, $xuid, $ev) : void{
 				try{
-					$this->playerDataProvider->saveData($name, $ev->getSaveData());
+					$this->playerDataProvider->saveData($name, $ev->getSaveData(), $xuid);
 				}catch(PlayerDataSaveException $e){
 					$this->logger->critical($this->language->translate(KnownTranslationFactory::pocketmine_data_saveError($name, $e->getMessage())));
 					$this->logger->logException($e);
@@ -567,7 +649,9 @@ class Server{
 	 * @phpstan-return Promise<Player>
 	 */
 	public function createPlayer(NetworkSession $session, PlayerInfo $playerInfo, bool $authenticated, ?CompoundTag $offlinePlayerData) : Promise{
-		$ev = new PlayerCreationEvent($session);
+		/** @phpstan-var ObjectSet<Promise<null>> $promises */
+		$promises = new ObjectSet();
+		$ev = new PlayerCreationEvent($session, $promises);
 		$ev->call();
 		$class = $ev->getPlayerClass();
 
@@ -584,6 +668,11 @@ class Server{
 		$playerPromiseResolver = new PromiseResolver();
 
 		$createPlayer = function(Location $location) use ($playerPromiseResolver, $class, $session, $playerInfo, $authenticated, $offlinePlayerData) : void{
+			if(!$session->isConnected()){
+				$playerPromiseResolver->reject();
+				return;
+			}
+
 			/** @see Player::__construct() */
 			$player = new $class($this, $session, $playerInfo, $authenticated, $location, $offlinePlayerData);
 			if(!$player->hasPlayedBefore()){
@@ -592,24 +681,37 @@ class Server{
 			$playerPromiseResolver->resolve($player);
 		};
 
-		if($playerPos === null){ //new player or no valid position due to world not being loaded
-			$world->requestSafeSpawn()->onCompletion(
-				function(Position $spawn) use ($createPlayer, $playerPromiseResolver, $session, $world) : void{
-					if(!$session->isConnected()){
-						$playerPromiseResolver->reject();
-						return;
+		$playerCreationRejected = function (Translatable|string $message) use ($playerPromiseResolver, $session) : void{
+			if($session->isConnected()){
+				$session->disconnectWithError($message);
+			}
+			$playerPromiseResolver->reject();
+		};
+
+		$playerCreationSucceeded = function () use ($playerPos, $world, $createPlayer, $playerCreationRejected) : void{
+			if($playerPos === null){ //new player or no valid position due to world not being loaded
+				$world->requestSafeSpawn()->onCompletion(
+					function(Position $spawn) use ($createPlayer, $world) : void{
+						$createPlayer(Location::fromObject($spawn, $world));
+					},
+					function() use ($playerCreationRejected) : void{
+						$playerCreationRejected(KnownTranslationFactory::pocketmine_disconnect_error_respawn());
 					}
-					$createPlayer(Location::fromObject($spawn, $world));
-				},
-				function() use ($playerPromiseResolver, $session) : void{
-					if($session->isConnected()){
-						$session->disconnectWithError(KnownTranslationFactory::pocketmine_disconnect_error_respawn());
-					}
-					$playerPromiseResolver->reject();
-				}
-			);
-		}else{ //returning player with a valid position - safe spawn not required
-			$createPlayer($playerPos);
+				);
+			}else{ //returning player with a valid position - safe spawn not required
+				$createPlayer($playerPos);
+			}
+		};
+
+		if(count($prs = $promises->toArray()) > 0){
+			/** @phpstan-var non-empty-array<int, Promise<null>> $prs */
+			$promise = Promise::all($prs);
+
+			$promise->onCompletion($playerCreationSucceeded, function () use ($playerCreationRejected) : void{
+				$playerCreationRejected("Failed to create player");
+			});
+		}else{
+			$playerCreationSucceeded();
 		}
 
 		return $playerPromiseResolver->getPromise();
@@ -652,6 +754,19 @@ class Server{
 		$name = strtolower($name);
 		foreach($this->getOnlinePlayers() as $player){
 			if(strtolower($player->getName()) === $name){
+				return $player;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Returns an online player with the given xuid, or null if not found.
+	 */
+	public function getPlayerByXuid(string $xuid) : ?Player{
+		foreach($this->getOnlinePlayers() as $player){
+			if($player->getXuid() === $xuid){
 				return $player;
 			}
 		}
@@ -991,7 +1106,14 @@ class Server{
 				$this->logger->warning($this->language->translate(KnownTranslationFactory::pocketmine_server_authProperty_disabled()));
 			}
 
-			$this->authKeyProvider = new AuthKeyProvider(new \PrefixedLogger($this->logger, "Minecraft Auth Key Provider"), $this->asyncPool);
+			######################
+			// RubyxNet: Передаём путь к дисковому JSON-файлу кэша открытых ключей
+			$this->authKeyProvider = new AuthKeyProvider(
+				new \PrefixedLogger($this->logger, "Minecraft Auth Key Provider"),
+				$this->asyncPool,
+				cachePath: $this->dataPath . "auth_keys_cache.json"
+			);
+			######################
 
 			if($this->configGroup->getConfigBool(ServerProperties::HARDCORE, false) && $this->getDifficulty() < World::DIFFICULTY_HARD){
 				$this->configGroup->setConfigInt(ServerProperties::DIFFICULTY, World::DIFFICULTY_HARD);
@@ -1020,6 +1142,7 @@ class Server{
 			$this->commandMap = new SimpleCommandMap($this);
 
 			$this->craftingManager = CraftingManagerFromDataHelper::make(BedrockDataFiles::RECIPES);
+			\pocketmine\crafting\DatapackRecipeLoader::loadFromServerRoot($this->craftingManager, $this->dataPath, $this->logger);
 
 			$this->resourceManager = new ResourcePackManager(Path::join($this->dataPath, "resource_packs"), $this->logger);
 
@@ -1042,6 +1165,79 @@ class Server{
 			$this->pluginManager = new PluginManager($this, $this->configGroup->getPropertyBool(Yml::PLUGINS_LEGACY_DATA_DIR, true) ? null : Path::join($this->dataPath, "plugin_data"), $pluginGraylist);
 			$this->pluginManager->registerInterface(new PharPluginLoader($this->autoloader));
 			$this->pluginManager->registerInterface(new ScriptPluginLoader());
+			$this->pluginManager->registerInterface(new FolderPluginLoader($this->autoloader));
+
+			$this->capabilities = new ServerCapabilities();
+			$this->capabilities->register("folder-plugins");
+			$this->capabilities->register("folder-packs");
+			$this->capabilities->register("nethernet");
+			$this->capabilities->register("session-record");
+			$this->capabilities->register("adaptive-qos");
+			$this->capabilities->register("world-clone");
+			$this->capabilities->register("multiworld-commands");
+			$this->capabilities->register("multiworld-module");
+			$this->capabilities->register("form-api");
+			$this->capabilities->register("plugin-data-version");
+			$this->capabilities->register("xuid-playerdata");
+			$this->capabilities->register("unknown-item");
+			$this->capabilities->register("tick-freeze");
+			$this->capabilities->register("prometheus-metrics");
+			$this->capabilities->register("camera-instruction");
+			$this->capabilities->register("unknown-block");
+			$this->capabilities->register("movement-guard");
+			$this->capabilities->register("datapacks");
+			$this->capabilities->register("plugin-security-scan");
+
+			$dangerousFns = \pocketmine\plugin\PluginSecurityScanner::listEnabledDangerousFunctions();
+			$hardenHints = \pocketmine\plugin\PluginSecurityScanner::listMissingHardeningHints();
+			if($dangerousFns !== [] || $hardenHints !== []){
+				$parts = [];
+				if($dangerousFns !== []){
+					$parts[] = "functions still enabled (" . implode(", ", $dangerousFns) . ")";
+				}
+				if($hardenHints !== []){
+					$parts[] = implode("; ", $hardenHints);
+				}
+				$this->logger->notice(
+					"Plugin security hardening incomplete: " . implode("; ", $parts) .
+					". OS process sandbox is not available in PHP — see resources/php.ini.recommended."
+				);
+			}
+
+			$this->adaptiveQosManager = new \pocketmine\network\qos\AdaptiveQosManager($this);
+			$coreHost = \pocketmine\plugin\CorePluginHost::create($this);
+			$this->corePluginHost = $coreHost;
+			$this->sessionRecordingManager = new \pocketmine\sessionrecord\SessionRecordingManager(
+				$this,
+				$coreHost
+			);
+			\pocketmine\world\multiworld\MultiWorldModule::enable($this, $coreHost);
+			$this->capabilities->register("worldedit");
+			$this->abuseLimitsManager = new \pocketmine\network\AbuseLimitsManager($this->configGroup);
+			$this->shutdownDrainSeconds = max(0, $this->configGroup->getPropertyInt("shutdown.drain-seconds", 10));
+			Filesystem::setFsyncEnabled($this->configGroup->getPropertyBool("world.save.fsync", true));
+			Filesystem::setRegionFsyncEnabled($this->configGroup->getPropertyBool("world.save.region-fsync", false));
+			\pocketmine\world\format\io\leveldb\LevelDB::setLevelDbSidecarEnabled($this->configGroup->getPropertyBool("world.save.leveldb-sidecar", true));
+			\pocketmine\player\MovementGuard::configureFromConfig($this->configGroup);
+			\pocketmine\form\ddui\DduiSettings::configureFromConfig($this->configGroup);
+			\pocketmine\form\ddui\DduiThemeRegistry::bootstrap($this);
+			\pocketmine\world\light\LightUpdatePolicy::configureFromConfig($this->configGroup);
+
+			$this->metricsRenderer = new \pocketmine\metrics\PrometheusTextRenderer();
+			$this->metricsEnabled = $this->configGroup->getPropertyBool("metrics.enabled", false);
+			$this->metricsFileEnabled = $this->configGroup->getPropertyBool("metrics.file", true);
+			$metricsBind = trim($this->configGroup->getPropertyString("metrics.bind", ""));
+			if($this->metricsEnabled && $metricsBind !== ""){
+				try{
+					$this->metricsHttpListener = new \pocketmine\metrics\MetricsHttpListener(
+						$metricsBind,
+						fn() : string => $this->metricsRenderer->render($this)
+					);
+					$this->logger->info("Prometheus metrics scrape listening on $metricsBind");
+				}catch(\Throwable $e){
+					$this->logger->error("Failed to start metrics listener: " . $e->getMessage());
+				}
+			}
 
 			$providerManager = new WorldProviderManager();
 			if(
@@ -1088,6 +1284,8 @@ class Server{
 				$this->forceShutdownExit();
 				return;
 			}
+
+			\pocketmine\world\worldedit\WorldEditModule::enable($this, $coreHost);
 
 			if(!$this->startupPrepareNetworkInterfaces()){
 				$this->forceShutdownExit();
@@ -1275,7 +1473,8 @@ class Server{
 	private function startupPrepareNetworkInterfaces() : bool{
 		foreach(array_slice(explode(
 			",",
-			$this->configGroup->getPropertyString(Yml::TRANSPORT_NAME, NetherNetTransport::NAME . "," . RakLibTransport::NAME), //TODO: remove raknet
+			// Default NetherNet-only; set transport.name: nethernet,raknet for dual-stack migration.
+			$this->configGroup->getPropertyString(Yml::TRANSPORT_NAME, NetherNetTransport::NAME),
 			limit: self::MAX_ACTIVE_TRANSPORTS + 1
 		), 0, self::MAX_ACTIVE_TRANSPORTS) as $name){
 			$name = strtolower(trim($name));
@@ -1290,9 +1489,9 @@ class Server{
 		}
 
 		$typeConverter = TypeConverter::getInstance();
-		$packetBroadcaster = new StandardPacketBroadcaster($this);
+		$packetBroadcaster = $this->getPacketBroadcaster(ProtocolInfo::CURRENT_PROTOCOL);
 		try{
-			$this->network->startActiveTransports($packetBroadcaster, new StandardEntityEventBroadcaster($packetBroadcaster, $typeConverter), $typeConverter);
+			$this->network->startActiveTransports($packetBroadcaster, $this->getEntityEventBroadcaster($packetBroadcaster, $typeConverter), $typeConverter);
 		}catch(NetworkInterfaceStartException $e){
 			$this->logger->emergency($e->getMessage());
 			return false;
@@ -1444,13 +1643,13 @@ class Server{
 	 *
 	 * @param bool|null $sync Compression on the main thread (true) or workers (false). Default is automatic (null).
 	 */
-	public function prepareBatch(string $buffer, Compressor $compressor, ?bool $sync = null, ?TimingsHandler $timings = null) : CompressBatchPromise|string{
+	public function prepareBatch(string $buffer, int $protocolId, Compressor $compressor, ?bool $sync = null, ?TimingsHandler $timings = null) : CompressBatchPromise|string{
 		$timings ??= Timings::$playerNetworkSendCompress;
 		try{
 			$timings->startTiming();
 
 			$threshold = $compressor->getCompressionThreshold();
-			if($threshold === null || strlen($buffer) < $compressor->getCompressionThreshold()){
+			if(($threshold === null || strlen($buffer) < $compressor->getCompressionThreshold()) && $protocolId >= ProtocolInfo::PROTOCOL_1_20_60){
 				$compressionType = CompressionAlgorithm::NONE;
 				$compressed = $buffer;
 
@@ -1459,7 +1658,7 @@ class Server{
 
 				if(!$sync && strlen($buffer) >= $this->networkCompressionAsyncThreshold){
 					$promise = new CompressBatchPromise();
-					$task = new CompressBatchTask($buffer, $promise, $compressor);
+					$task = new CompressBatchTask($buffer, $promise, $compressor, $protocolId);
 					$this->asyncPool->submitTask($task);
 					return $promise;
 				}
@@ -1468,7 +1667,7 @@ class Server{
 				$compressed = $compressor->compress($buffer);
 			}
 
-			return chr($compressionType->value) . $compressed;
+			return ($protocolId >= ProtocolInfo::PROTOCOL_1_20_60 ? chr($compressionType->value) : '') . $compressed;
 		}finally{
 			$timings->stopTiming();
 		}
@@ -1496,6 +1695,9 @@ class Server{
 	 */
 	public function dispatchCommand(CommandSender $sender, string $commandLine, bool $internal = false) : bool{
 		if(!$internal){
+			if($sender instanceof Player && isset($this->abuseLimitsManager) && !$this->abuseLimitsManager->allowCommand($sender)){
+				return false;
+			}
 			$ev = new CommandEvent($sender, $commandLine);
 			$ev->call();
 			if($ev->isCancelled()){
@@ -1509,22 +1711,98 @@ class Server{
 	}
 
 	/**
-	 * Shuts the server down correctly
+	 * Shuts the server down correctly.
+	 * With shutdown.drain-seconds > 0, refuses new joins and waits until empty or the deadline before stopping the tick loop.
 	 */
 	public function shutdown() : void{
-		if($this->isRunning){
-			$this->isRunning = false;
-			$this->signalHandler->unregister();
+		if(!$this->isRunning || $this->draining){
+			return;
+		}
 
-			if(TimingsHandler::isEnabled()){
-				TimingsHandler::createReportFile(Path::join($this->getDataPath(), "timings"))->onCompletion(
-					function(string $timingsFile) : void{
-						$this->logger->info($this->language->translate(KnownTranslationFactory::pocketmine_command_timings_timingsWrite($timingsFile)));
-						TimingsHandler::setEnabled(false);
-					},
-					fn() => $this->logger->error("Failed to create timings report file")
-				);
+		$this->writeHealthStatus("stopping");
+
+		if($this->shutdownDrainSeconds <= 0){
+			$this->completeShutdown();
+			return;
+		}
+
+		$this->draining = true;
+		$this->drainDeadline = microtime(true) + $this->shutdownDrainSeconds;
+		$online = count($this->getOnlinePlayers());
+		$this->logger->info("Graceful shutdown: refusing joins, draining up to {$this->shutdownDrainSeconds}s ($online player(s) online)");
+		$this->broadcastMessage(TextFormat::YELLOW . "Server is shutting down — please reconnect later.");
+	}
+
+	private function completeShutdown() : void{
+		if(!$this->isRunning){
+			return;
+		}
+		$this->draining = false;
+		$this->isRunning = false;
+		$this->signalHandler->unregister();
+		$this->writeHealthStatus("stopping");
+
+		if(TimingsHandler::isEnabled()){
+			TimingsHandler::createReportFile(Path::join($this->getDataPath(), "timings"))->onCompletion(
+				function(string $timingsFile) : void{
+					$this->logger->info($this->language->translate(KnownTranslationFactory::pocketmine_command_timings_timingsWrite($timingsFile)));
+					TimingsHandler::setEnabled(false);
+				},
+				fn() => $this->logger->error("Failed to create timings report file")
+			);
+		}
+	}
+
+	private function tickDrain() : void{
+		if(!$this->draining){
+			return;
+		}
+		$online = count($this->getOnlinePlayers());
+		$now = microtime(true);
+		if($online === 0 || $now >= $this->drainDeadline){
+			$this->logger->info("Graceful drain finished ($online player(s) remaining) — stopping");
+			$this->completeShutdown();
+		}
+	}
+
+	/**
+	 * Atomically updates health.status for Docker/K8s probes.
+	 */
+	public function writeHealthStatus(string $state = "ok") : void{
+		$path = Path::join($this->dataPath, "health.status");
+		$flushAges = [];
+		if($state === "ok" && isset($this->worldManager)){
+			foreach($this->worldManager->getWorlds() as $world){
+				$provider = $world->getProvider();
+				if($provider instanceof \pocketmine\world\format\io\leveldb\LevelDB){
+					$age = $provider->getLastFlushAgeSeconds();
+					if($age !== null){
+						$flushAges[] = $world->getFolderName() . "=" . $age;
+					}
+				}
 			}
+		}
+		$line = $state === "ok"
+			? ("ok " . $this->tickCounter . " " . time() . ($flushAges !== [] ? (" flush_age_s:" . implode(",", $flushAges)) : ""))
+			: ($state . " " . time());
+		try{
+			Filesystem::safeFilePutContents($path, $line . "\n");
+		}catch(\Throwable){
+			// best-effort for probes; never break the tick
+		}
+	}
+
+	private function writeMetricsIfEnabled() : void{
+		if(!$this->metricsEnabled || !$this->metricsFileEnabled || !isset($this->metricsRenderer)){
+			return;
+		}
+		try{
+			Filesystem::safeFilePutContents(
+				Path::join($this->dataPath, "metrics.prom"),
+				$this->metricsRenderer->render($this)
+			);
+		}catch(\Throwable){
+			// best-effort
 		}
 	}
 
@@ -1544,6 +1822,7 @@ class Server{
 
 		if($this->isRunning){
 			$this->logger->emergency($this->language->translate(KnownTranslationFactory::pocketmine_server_forcingShutdown()));
+			$this->hasForceShutdown = true;
 		}
 		try{
 			if(!$this->isRunning()){
@@ -1553,6 +1832,19 @@ class Server{
 			$this->hasStopped = true;
 
 			$this->shutdown();
+
+			if(isset($this->sessionRecordingManager)){
+				$this->logger->debug("Stopping session recordings");
+				$this->sessionRecordingManager->shutdown();
+			}
+			if(\pocketmine\world\worldedit\WorldEditModule::isEnabled()){
+				$this->logger->debug("Stopping WorldEdit module");
+				\pocketmine\world\worldedit\WorldEditModule::disable();
+			}
+			if(isset($this->metricsHttpListener)){
+				$this->metricsHttpListener->close();
+				$this->metricsHttpListener = null;
+			}
 
 			if(isset($this->pluginManager)){
 				$this->logger->debug("Disabling all plugins");
@@ -1824,6 +2116,10 @@ class Server{
 	public function removeOnlinePlayer(Player $player) : void{
 		if(isset($this->playerList[$rawUUID = $player->getUniqueId()->getBytes()])){
 			unset($this->playerList[$rawUUID]);
+			$this->adaptiveQosManager?->onPlayerQuit($player);
+			if(isset($this->abuseLimitsManager)){
+				$this->abuseLimitsManager->onPlayerQuit($player);
+			}
 			foreach($this->playerList as $p){
 				$p->getNetworkSession()->onPlayerRemoved($player);
 			}
@@ -1896,15 +2192,27 @@ class Server{
 
 		++$this->tickCounter;
 
-		Timings::$scheduler->startTiming();
-		$this->pluginManager->tickSchedulers($this->tickCounter);
-		Timings::$scheduler->stopTiming();
+		$runGameTick = !$this->tickFrozen || $this->pendingTickSteps > 0;
+		if($runGameTick){
+			Timings::$scheduler->startTiming();
+			$this->pluginManager->tickSchedulers($this->tickCounter);
+			Timings::$scheduler->stopTiming();
 
-		Timings::$schedulerAsync->startTiming();
-		$this->asyncPool->collectTasks();
-		Timings::$schedulerAsync->stopTiming();
+			Timings::$schedulerAsync->startTiming();
+			$this->asyncPool->collectTasks();
+			Timings::$schedulerAsync->stopTiming();
 
-		$this->worldManager->tick($this->tickCounter);
+			$this->worldManager->tick($this->tickCounter);
+
+			if($this->tickFrozen && $this->pendingTickSteps > 0){
+				--$this->pendingTickSteps;
+			}
+		}else{
+			// Still collect finished async tasks so freezes do not stall the pool forever.
+			Timings::$schedulerAsync->startTiming();
+			$this->asyncPool->collectTasks();
+			Timings::$schedulerAsync->stopTiming();
+		}
 
 		Timings::$connection->startTiming();
 		$this->network->tick();
@@ -1923,7 +2231,15 @@ class Server{
 
 			$this->network->updateName();
 			$this->network->getBandwidthTracker()->rotateAverageHistory();
+
+			if(!$this->draining){
+				$this->writeHealthStatus("ok");
+			}
+			$this->tickDrain();
+			$this->writeMetricsIfEnabled();
 		}
+
+		$this->metricsHttpListener?->tick();
 
 		if($this->sendUsageTicker > 0 && --$this->sendUsageTicker === 0){
 			$this->sendUsageTicker = self::TICKS_PER_STATS_REPORT;
@@ -1942,6 +2258,9 @@ class Server{
 
 		$this->memoryManager->check();
 
+		$this->adaptiveQosManager?->tick($this->tickCounter);
+		$this->sessionRecordingManager?->tick($this->tickCounter);
+
 		if($this->console !== null){
 			Timings::$serverCommand->startTiming();
 			while(($line = $this->console->readLine()) !== null){
@@ -1957,6 +2276,12 @@ class Server{
 		$totalTickTimeSeconds = $now - $tickTime + ($this->tickSleeper->getNotificationProcessingTime() / 1_000_000_000);
 		$this->currentTPS = min(self::TARGET_TICKS_PER_SECOND, 1 / max(0.001, $totalTickTimeSeconds));
 		$this->currentUse = min(1, $totalTickTimeSeconds / self::TARGET_SECONDS_PER_TICK);
+		if(isset($this->metricsRenderer)){
+			$this->metricsRenderer->observeTickDurationSeconds($totalTickTimeSeconds);
+			foreach($this->worldManager->getWorlds() as $world){
+				$this->metricsRenderer->observeWorldTickMs($world->getFolderName(), (float) $world->tickRateTime);
+			}
+		}
 
 		TimingsHandler::tick($this->currentTPS <= $this->profilingTickRate);
 
@@ -1970,5 +2295,13 @@ class Server{
 		}else{
 			$this->nextTick += self::TARGET_SECONDS_PER_TICK;
 		}
+	}
+
+	public function getPacketBroadcaster(int $protocolId) : PacketBroadcaster{
+		return $this->packetBroadcasters[$protocolId] ??= new StandardPacketBroadcaster($this, $protocolId);
+	}
+
+	public function getEntityEventBroadcaster(PacketBroadcaster $packetBroadcaster, TypeConverter $typeConverter) : EntityEventBroadcaster{
+		return $this->entityEventBroadcasters[spl_object_id($packetBroadcaster) . ':' . spl_object_id($typeConverter)] ??= new StandardEntityEventBroadcaster($packetBroadcaster, $typeConverter);
 	}
 }

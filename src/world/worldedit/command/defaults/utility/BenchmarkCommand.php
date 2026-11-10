@@ -1,0 +1,73 @@
+<?php
+
+namespace pocketmine\world\worldedit\command\defaults\utility;
+
+use pocketmine\world\worldedit\command\WorldEditCommand;
+use pocketmine\world\worldedit\command\FlagArgumentParser;
+use pocketmine\world\worldedit\command\flags\CommandFlag;
+use pocketmine\world\worldedit\command\flags\CommandFlagCollection;
+use pocketmine\world\worldedit\command\flags\SingularCommandFlag;
+use pocketmine\world\worldedit\command\KnownPermissions;
+use pocketmine\world\worldedit\session\Session;
+use pocketmine\world\worldedit\session\SessionManager;
+use pocketmine\world\worldedit\task\benchmark\BenchmarkManager;
+use pocketmine\world\worldedit\utils\MessageComponent;
+use pocketmine\world\worldedit\utils\MessageCompound;
+use pocketmine\world\worldedit\utils\MixedUtils;
+
+class BenchmarkCommand extends WorldEditCommand
+{
+	use FlagArgumentParser;
+
+	public function __construct()
+	{
+		parent::__construct("/benchmark", [KnownPermissions::PERMISSION_MANAGE]);
+	}
+
+	/**
+	 * @param Session               $session
+	 * @param CommandFlagCollection $flags
+	 */
+	public function process(Session $session, CommandFlagCollection $flags): void
+	{
+		if (BenchmarkManager::isRunning()) {
+			$session->sendMessage("benchmark-running");
+			return;
+		}
+
+		$session->sendMessage("benchmark-start");
+
+		$executor = $session->getPlayer();
+		BenchmarkManager::start($session, static function (float $tpsAvg, float $tpsMin, float $loadAvg, float $loadMax, int $tasks, float $time, array $results) use ($executor): void {
+			$resultMsg = new MessageCompound();
+			foreach ($results as $i => $result) {
+				$resultMsg->addComponent(new MessageComponent("benchmark-result", [
+					"{task}" => (string) ($i + 1),
+					"{name}" => (string) $result[0],
+					"{time}" => (string) round($result[2], 2),
+					"{blocks}" => MixedUtils::humanReadable($result[1])
+				]));
+			}
+			SessionManager::get($executor)->sendMessage("benchmark-finished", [
+				"{tps_avg}" => (string) round($tpsAvg, 2),
+				"{tps_min}" => (string) $tpsMin,
+				"{load_avg}" => (string) round($loadAvg, 2),
+				"{load_max}" => (string) $loadMax,
+				"{tasks}" => (string) $tasks,
+				"{time}" => (string) round($time, 2),
+				"{results}" => $resultMsg
+			]);
+		}, !$flags->hasFlag("keep"));
+	}
+
+	/**
+	 * @param Session $session
+	 * @return CommandFlag[]
+	 */
+	public function getKnownFlags(Session $session): array
+	{
+		return [
+			"keep" => new SingularCommandFlag("keep", [], "k") //intentionally not documented, as it provides no benefits other than simplified debugging
+		];
+	}
+}

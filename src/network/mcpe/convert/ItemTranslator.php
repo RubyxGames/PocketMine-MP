@@ -24,6 +24,7 @@ declare(strict_types=1);
 namespace pocketmine\network\mcpe\convert;
 
 use pocketmine\data\bedrock\item\BlockItemIdMap;
+use pocketmine\data\bedrock\item\downgrade\ItemIdMetaDowngrader;
 use pocketmine\data\bedrock\item\ItemDeserializer;
 use pocketmine\data\bedrock\item\ItemSerializer;
 use pocketmine\data\bedrock\item\ItemTypeDeserializeException;
@@ -31,8 +32,10 @@ use pocketmine\data\bedrock\item\ItemTypeSerializeException;
 use pocketmine\data\bedrock\item\SavedItemData;
 use pocketmine\item\Item;
 use pocketmine\nbt\tag\CompoundTag;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\serializer\ItemTypeDictionary;
 use pocketmine\utils\AssumptionFailedError;
+use pocketmine\world\format\io\GlobalItemDataHandlers;
 
 /**
  * This class handles translation between network item ID+metadata to PocketMine-MP internal ID+metadata and vice versa.
@@ -45,7 +48,8 @@ final class ItemTranslator{
 		private BlockStateDictionary $blockStateDictionary,
 		private ItemSerializer $itemSerializer,
 		private ItemDeserializer $itemDeserializer,
-		private BlockItemIdMap $blockItemIdMap
+		private BlockItemIdMap $blockItemIdMap,
+		private ItemIdMetaDowngrader $itemDataDowngrader,
 	){}
 
 	/**
@@ -69,15 +73,23 @@ final class ItemTranslator{
 	public function toNetworkId(Item $item) : array{
 		//TODO: we should probably come up with a cache for this
 
-		$itemData = $this->itemSerializer->serializeType($item);
+		$itemData = $this->itemSerializer->serializeType($item, $this->itemDataDowngrader);
 
-		$numericId = $this->itemTypeDictionary->fromStringId($itemData->getName());
+		try {
+			$numericId = $this->itemTypeDictionary->fromStringId($itemData->getName());
+		} catch (\InvalidArgumentException) {
+			throw new ItemTypeSerializeException("Unknown item type " . $itemData->getName());
+		}
+
 		$blockStateData = $itemData->getBlock();
 
 		if($blockStateData !== null){
 			$blockRuntimeId = $this->blockStateDictionary->lookupStateIdFromData($blockStateData);
 			if($blockRuntimeId === null){
-				throw new AssumptionFailedError("Unmapped blockstate returned by blockstate serializer: " . $blockStateData->toNbt());
+				// UnknownItem / unimplemented vanilla blocks can serialize a type id that exists in the
+				// item dictionary but has no palette entry yet. Treat as serialize failure so callers
+				// (toNetworkIdQuiet → INFO_UPDATE fallback) do not crash the server.
+				throw new ItemTypeSerializeException("Unmapped blockstate returned by blockstate serializer: " . $blockStateData->toNbt());
 			}
 		}else{
 			$blockRuntimeId = null;
@@ -93,7 +105,7 @@ final class ItemTranslator{
 		//TODO: this relies on the assumption that network item NBT is the same as disk item NBT, which may not always
 		//be true - if we stick on an older world version while updating network version, this could be a problem (and
 		//may be a problem for multi version implementations)
-		return $this->itemSerializer->serializeStack($item)->toNbt();
+		return $this->itemSerializer->serializeStack($item, null, $this->itemDataDowngrader)->toNbt();
 	}
 
 	/**
@@ -109,7 +121,7 @@ final class ItemTranslator{
 
 		$blockStateData = null;
 		if($this->blockItemIdMap->lookupBlockId($stringId) !== null){
-			$blockStateData = $this->blockStateDictionary->generateDataFromStateId($networkBlockRuntimeId);
+			$blockStateData = $this->blockStateDictionary->generateCurrentDataFromStateId($networkBlockRuntimeId);
 			if($blockStateData === null){
 				throw new TypeConversionException("Blockstate runtimeID $networkBlockRuntimeId does not correspond to any known blockstate");
 			}
@@ -117,10 +129,69 @@ final class ItemTranslator{
 			throw new TypeConversionException("Item $stringId is not a blockitem, but runtime ID $networkBlockRuntimeId was provided");
 		}
 
+		[$stringId, $networkMeta] = GlobalItemDataHandlers::getUpgrader()->getIdMetaUpgrader()->upgrade($stringId, $networkMeta);
+
 		try{
 			return $this->itemDeserializer->deserializeType(new SavedItemData($stringId, $networkMeta, $blockStateData));
 		}catch(ItemTypeDeserializeException $e){
 			throw TypeConversionException::wrap($e, "Invalid network itemstack data");
 		}
+	}
+
+	public static function getItemSchemaId(int $protocolId) : int{
+		return match($protocolId){
+			ProtocolInfo::PROTOCOL_1_26_60 => 291,
+
+			ProtocolInfo::PROTOCOL_1_26_50 => 281,
+
+			ProtocolInfo::PROTOCOL_1_26_45,
+			ProtocolInfo::PROTOCOL_1_26_44,
+			ProtocolInfo::PROTOCOL_1_26_40 => 271,
+
+			ProtocolInfo::PROTOCOL_1_26_30,
+			ProtocolInfo::PROTOCOL_1_26_20 => 261,
+
+			ProtocolInfo::PROTOCOL_1_26_10,
+			ProtocolInfo::PROTOCOL_1_26_0,
+			ProtocolInfo::PROTOCOL_1_21_130,
+			ProtocolInfo::PROTOCOL_1_21_124,
+			ProtocolInfo::PROTOCOL_1_21_120,
+			ProtocolInfo::PROTOCOL_1_21_111 => 251,
+
+			ProtocolInfo::PROTOCOL_1_21_100 => 241,
+
+			ProtocolInfo::PROTOCOL_1_21_93,
+			ProtocolInfo::PROTOCOL_1_21_90,
+			ProtocolInfo::PROTOCOL_1_21_80,
+			ProtocolInfo::PROTOCOL_1_21_70,
+			ProtocolInfo::PROTOCOL_1_21_60,
+			ProtocolInfo::PROTOCOL_1_21_50 => 231,
+
+			ProtocolInfo::PROTOCOL_1_21_40 => 221,
+
+			ProtocolInfo::PROTOCOL_1_21_30 => 211,
+
+			ProtocolInfo::PROTOCOL_1_21_20 => 201,
+
+			ProtocolInfo::PROTOCOL_1_21_2,
+			ProtocolInfo::PROTOCOL_1_21_0 => 191,
+
+			ProtocolInfo::PROTOCOL_1_20_80 => 181,
+
+			ProtocolInfo::PROTOCOL_1_20_70 => 171,
+
+			ProtocolInfo::PROTOCOL_1_20_60 => 161,
+
+			ProtocolInfo::PROTOCOL_1_20_50 => 151,
+
+			ProtocolInfo::PROTOCOL_1_20_40,
+			ProtocolInfo::PROTOCOL_1_20_30 => 141,
+
+			ProtocolInfo::PROTOCOL_1_20_10 => 121,
+
+			ProtocolInfo::PROTOCOL_1_20_0 => 111,
+
+			default => throw new AssumptionFailedError("Unknown protocol ID $protocolId"),
+		};
 	}
 }

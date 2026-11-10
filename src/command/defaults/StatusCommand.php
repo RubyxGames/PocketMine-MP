@@ -29,12 +29,15 @@ use pocketmine\lang\Translatable;
 use pocketmine\permission\DefaultPermissionNames;
 use pocketmine\utils\Process;
 use pocketmine\utils\TextFormat;
+use function array_keys;
 use function count;
 use function floor;
+use function implode;
 use function microtime;
 use function number_format;
 use function round;
 use function strval;
+use function usleep;
 
 class StatusCommand extends VanillaCommand{
 
@@ -55,21 +58,60 @@ class StatusCommand extends VanillaCommand{
 	}
 
 	private static function formatBandwidth(float $bytes) : Translatable{
-		//TODO: this should probably be number formatted?
 		return l10n::pocketmine_command_status_network_stat(strval(round($bytes / 1024, 2)))->prefix(TextFormat::RED);
 	}
 
-	private static function formatMemory(int $bytes) : Translatable{
-		return l10n::pocketmine_command_status_memory_stat(number_format(round(($bytes / 1024) / 1024, 2), 2))->prefix(TextFormat::RED);
+	/** Human size: MB under 1 GB, else GB. */
+	private static function formatBytes(int $bytes) : string{
+		$mb = $bytes / 1024 / 1024;
+		if($mb >= 1024.0){
+			return number_format(round($mb / 1024.0, 2), 2) . " GB";
+		}
+		return number_format(round($mb, 2), 2) . " MB";
+	}
+
+	private static function usageColor(float $percent) : string{
+		if($percent >= 90.0){
+			return TextFormat::RED;
+		}
+		if($percent >= 70.0){
+			return TextFormat::GOLD;
+		}
+		return TextFormat::GREEN;
+	}
+
+	/**
+	 * @return Translatable colored "used / total (percent%)"
+	 */
+	private static function formatUsage(int $usedBytes, int $totalBytes, float $percent) : Translatable{
+		$color = self::usageColor($percent);
+		return l10n::pocketmine_command_status_usage_stat(
+			$color . self::formatBytes($usedBytes) . TextFormat::RESET,
+			$color . self::formatBytes($totalBytes) . TextFormat::RESET,
+			$color . number_format(round($percent, 1), 1) . TextFormat::RESET
+		);
 	}
 
 	public function execute(CommandSender $sender, string $commandLabel, array $args){
-		$mUsage = Process::getAdvancedMemoryUsage();
+		// Sample VPS CPU over a short window (/proc/stat delta).
+		Process::getSystemCpuUsagePercent();
+		usleep(80_000);
+		$vpsCpu = Process::getSystemCpuUsagePercent();
 
 		$server = $sender->getServer();
 		$sender->sendMessage(l10n::pocketmine_command_status_header()->format(
 			TextFormat::GREEN . "---- " . TextFormat::RESET,
 			TextFormat::GREEN . " ----" . TextFormat::RESET
+		));
+
+		self::send($sender, l10n::pocketmine_command_status_version(
+			TextFormat::AQUA . $server->getName() . " " . $server->getPocketMineVersion() . TextFormat::RESET
+		));
+
+		$online = count($server->getOnlinePlayers());
+		$max = $server->getMaxPlayers();
+		self::send($sender, l10n::pocketmine_command_status_players(
+			TextFormat::GREEN . (string) $online . TextFormat::GOLD . " / " . TextFormat::GREEN . (string) $max . TextFormat::RESET
 		));
 
 		$time = (int) (microtime(true) - $server->getStartTime());
@@ -91,6 +133,10 @@ class StatusCommand extends VanillaCommand{
 
 		self::send($sender, l10n::pocketmine_command_status_uptime($message->prefix(TextFormat::RED)));
 
+		if($server->isTickFrozen()){
+			self::send($sender, l10n::pocketmine_command_status_tick_frozen()->prefix(TextFormat::RED));
+		}
+
 		$tpsColor = TextFormat::GREEN;
 		$tps = $server->getTicksPerSecond();
 		if($tps < 12){
@@ -100,22 +146,59 @@ class StatusCommand extends VanillaCommand{
 		}
 
 		self::send($sender, l10n::pocketmine_command_status_tps_current(self::formatTPS($tps, $server->getTickUsage(), $tpsColor)));
-		self::send($sender, l10n::pocketmine_command_status_tps_average(self::formatTPS($server->getTicksPerSecondAverage(), $server->getTickUsageAverage(), $tpsColor)));
+
+		$avgTps = $server->getTicksPerSecondAverage();
+		$avgColor = TextFormat::GREEN;
+		if($avgTps < 12){
+			$avgColor = TextFormat::RED;
+		}elseif($avgTps < 17){
+			$avgColor = TextFormat::GOLD;
+		}
+		self::send($sender, l10n::pocketmine_command_status_tps_average(self::formatTPS($avgTps, $server->getTickUsageAverage(), $avgColor)));
+
+		if($vpsCpu !== null){
+			self::send($sender, l10n::pocketmine_command_status_cpu(
+				l10n::pocketmine_command_status_cpu_stat(number_format(round($vpsCpu, 1), 1))->prefix(self::usageColor($vpsCpu))
+			));
+		}
+
+		$sysMem = Process::getSystemMemoryUsage();
+		if($sysMem !== null){
+			$pct = ($sysMem["total"] > 0) ? ($sysMem["used"] / $sysMem["total"]) * 100.0 : 0.0;
+			self::send($sender, l10n::pocketmine_command_status_ram_system(
+				self::formatUsage($sysMem["used"], $sysMem["total"], $pct)
+			));
+		}
+
+		$disk = Process::getDiskUsage($server->getDataPath());
+		if($disk !== null){
+			$diskPct = ($disk["total"] > 0) ? ($disk["used"] / $disk["total"]) * 100.0 : 0.0;
+			self::send($sender, l10n::pocketmine_command_status_disk(
+				self::formatUsage($disk["used"], $disk["total"], $diskPct)
+			));
+		}
 
 		$bandwidth = $server->getNetwork()->getBandwidthTracker();
 		self::send($sender, l10n::pocketmine_command_status_network_upload(self::formatBandwidth($bandwidth->getSend()->getAverageBytes())));
 		self::send($sender, l10n::pocketmine_command_status_network_download(self::formatBandwidth($bandwidth->getReceive()->getAverageBytes())));
 
-		self::send($sender, l10n::pocketmine_command_status_threads(TextFormat::RED . Process::getThreadCount()));
+		$transportNames = array_keys($server->getNetwork()->getActiveTransports());
+		self::send($sender, l10n::pocketmine_command_status_transport(
+			TextFormat::AQUA . (count($transportNames) === 0 ? "-" : implode(", ", $transportNames)) . TextFormat::RESET
+		));
 
-		self::send($sender, l10n::pocketmine_command_status_memory_mainThread(self::formatMemory($mUsage[0])));
-		self::send($sender, l10n::pocketmine_command_status_memory_total(self::formatMemory($mUsage[1])));
-		self::send($sender, l10n::pocketmine_command_status_memory_virtual(self::formatMemory($mUsage[2])));
-
-		$globalLimit = $server->getMemoryManager()->getGlobalMemoryLimit();
-		if($globalLimit > 0){
-			self::send($sender, l10n::pocketmine_command_status_memory_manager(self::formatMemory($globalLimit)));
+		$enabledPlugins = 0;
+		foreach($server->getPluginManager()->getPlugins() as $plugin){
+			if($plugin->isEnabled()){
+				$enabledPlugins++;
+			}
 		}
+		self::send($sender, l10n::pocketmine_command_status_plugins(
+			TextFormat::GREEN . (string) $enabledPlugins . TextFormat::GOLD . " / " .
+			TextFormat::GREEN . (string) count($server->getPluginManager()->getPlugins()) . TextFormat::RESET
+		));
+
+		self::send($sender, l10n::pocketmine_command_status_threads(TextFormat::RED . Process::getThreadCount()));
 
 		foreach($server->getWorldManager()->getWorlds() as $world){
 			$worldName = $world->getFolderName() !== $world->getDisplayName() ? " (" . $world->getDisplayName() . ")" : "";

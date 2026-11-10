@@ -33,24 +33,37 @@ use function array_unshift;
  *
  * This event should be used to decide which resource packs to offer the player and whether to require the player to
  * download the packs before they can join the server.
+ *
+ * Note: Bedrock cannot hot-swap resource packs mid-session. Changing stacks after join requires the player to reconnect.
  */
 class PlayerResourcePackOfferEvent extends Event{
 	/**
 	 * @param ResourcePack[] $resourcePacks
 	 * @param string[]       $encryptionKeys pack UUID => key, leave unset for any packs that are not encrypted
+	 * @param string[]       $cdnUrls        pack UUID => HTTPS URL for CDN download (optional)
 	 *
 	 * @phpstan-param list<ResourcePack>    $resourcePacks
 	 * @phpstan-param array<string, string> $encryptionKeys
+	 * @phpstan-param array<string, string> $cdnUrls
 	 */
 	public function __construct(
 		private readonly PlayerInfo $playerInfo,
 		private array $resourcePacks,
 		private array $encryptionKeys,
-		private bool $mustAccept
+		private bool $mustAccept,
+		private array $cdnUrls = [],
+		private readonly ?string $stackProfile = null
 	){}
 
 	public function getPlayerInfo() : PlayerInfo{
 		return $this->playerInfo;
+	}
+
+	/**
+	 * World folder name or named stack used to seed this offer, if any.
+	 */
+	public function getStackProfile() : ?string{
+		return $this->stackProfile;
 	}
 
 	/**
@@ -94,6 +107,22 @@ class PlayerResourcePackOfferEvent extends Event{
 	 */
 	public function getEncryptionKeys() : array{
 		return $this->encryptionKeys;
+	}
+
+	/**
+	 * @return string[] UUID => CDN URL
+	 * @phpstan-return array<string, string>
+	 */
+	public function getCdnUrls() : array{
+		return $this->cdnUrls;
+	}
+
+	/**
+	 * @param string[] $cdnUrls UUID => CDN URL
+	 * @phpstan-param array<string, string> $cdnUrls
+	 */
+	public function setCdnUrls(array $cdnUrls) : void{
+		$this->cdnUrls = $cdnUrls;
 	}
 
 	public function setMustAccept(bool $mustAccept) : void{

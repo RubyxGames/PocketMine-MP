@@ -26,10 +26,13 @@ namespace pocketmine\event\player;
 use pocketmine\event\Cancellable;
 use pocketmine\event\CancellableTrait;
 use pocketmine\lang\Translatable;
+use pocketmine\network\mcpe\protocol\types\GatheringJoinInfo;
 use pocketmine\player\Player;
 
 /**
  * Called when a player attempts to be transferred to another server, e.g. by using /transferserver.
+ *
+ * For NetherNet destinations, address/port should target the destination signaling endpoint (see docs/nethernet.md).
  */
 class PlayerTransferEvent extends PlayerEvent implements Cancellable{
 	use CancellableTrait;
@@ -38,7 +41,9 @@ class PlayerTransferEvent extends PlayerEvent implements Cancellable{
 		Player $player,
 		protected string $address,
 		protected int $port,
-		protected Translatable|string $message
+		protected Translatable|string $message,
+		protected bool $reloadWorld = false,
+		protected ?GatheringJoinInfo $gatheringsConfig = null
 	){
 		$this->player = $player;
 	}
@@ -83,5 +88,27 @@ class PlayerTransferEvent extends PlayerEvent implements Cancellable{
 	 */
 	public function setMessage(Translatable|string $message) : void{
 		$this->message = $message;
+	}
+
+	/**
+	 * Whether the client should reload the world after transfer (TransferPacket flag since 1.21.30).
+	 */
+	public function isReloadWorld() : bool{
+		return $this->reloadWorld;
+	}
+
+	public function setReloadWorld(bool $reloadWorld) : void{
+		$this->reloadWorld = $reloadWorld;
+	}
+
+	/**
+	 * Optional gatherings/experience join metadata (TransferPacket since 1.26.40). Null omits the field.
+	 */
+	public function getGatheringsConfig() : ?GatheringJoinInfo{
+		return $this->gatheringsConfig;
+	}
+
+	public function setGatheringsConfig(?GatheringJoinInfo $gatheringsConfig) : void{
+		$this->gatheringsConfig = $gatheringsConfig;
 	}
 }

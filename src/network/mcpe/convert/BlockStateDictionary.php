@@ -26,11 +26,16 @@ namespace pocketmine\network\mcpe\convert;
 use pocketmine\data\bedrock\block\BlockStateData;
 use pocketmine\data\bedrock\block\BlockTypeNames;
 use pocketmine\nbt\NbtDataException;
+use pocketmine\nbt\tag\Tag;
 use pocketmine\nbt\TreeRoot;
 use pocketmine\network\mcpe\protocol\serializer\NetworkNbtSerializer;
 use pocketmine\utils\Utils;
+use pocketmine\world\format\io\GlobalBlockStateHandlers;
+use function array_diff_key;
+use function array_filter;
 use function array_key_first;
 use function array_map;
+use function array_merge;
 use function count;
 use function get_debug_type;
 use function is_array;
@@ -57,11 +62,14 @@ final class BlockStateDictionary{
 
 	/**
 	 * @param BlockStateDictionaryEntry[] $states
+	 * @param Tag[][]                     $addedPropertyDefaults properties the upgrader added to all states of a block
 	 *
 	 * @phpstan-param list<BlockStateDictionaryEntry> $states
+	 * @phpstan-param array<string, array<string, Tag>> $addedPropertyDefaults
 	 */
 	public function __construct(
-		private array $states
+		private array $states,
+		private array $addedPropertyDefaults = []
 	){
 		$table = [];
 		foreach($this->states as $stateId => $stateNbt){
@@ -74,6 +82,20 @@ final class BlockStateDictionary{
 				$this->stateDataToStateIdLookup[$name] = $stateIds[array_key_first($stateIds)];
 			}else{
 				$this->stateDataToStateIdLookup[$name] = $stateIds;
+			}
+		}
+
+		$standardSkull = $this->stateDataToStateIdLookup[BlockTypeNames::SKELETON_SKULL];
+		foreach([
+			BlockTypeNames::WITHER_SKELETON_SKULL,
+			BlockTypeNames::ZOMBIE_HEAD,
+			BlockTypeNames::PLAYER_HEAD,
+			BlockTypeNames::CREEPER_HEAD,
+			BlockTypeNames::DRAGON_HEAD,
+			BlockTypeNames::PIGLIN_HEAD
+		] as $skull){
+			if(!isset($this->stateDataToStateIdLookup[$skull])){
+				$this->stateDataToStateIdLookup[$skull] = $standardSkull;
 			}
 		}
 	}
@@ -109,6 +131,10 @@ final class BlockStateDictionary{
 		return ($this->states[$networkRuntimeId] ?? null)?->generateStateData();
 	}
 
+	public function generateCurrentDataFromStateId(int $networkRuntimeId) : ?BlockStateData{
+		return ($this->states[$networkRuntimeId] ?? null)?->generateCurrentStateData();
+	}
+
 	/**
 	 * Searches for the appropriate state ID which matches the given blockstate NBT.
 	 * Returns null if there were no matches.
@@ -117,11 +143,16 @@ final class BlockStateDictionary{
 		$name = $data->getName();
 
 		$lookup = $this->stateDataToStateIdLookup[$name] ?? null;
-		return match(true){
+		$result = match(true){
 			$lookup === null => null,
 			is_int($lookup) => $lookup,
 			is_array($lookup) => $lookup[BlockStateDictionaryEntry::encodeStateProperties($data->getStates())] ?? null
 		};
+		if($result === null && is_array($lookup) && isset($this->addedPropertyDefaults[$name])){
+			//this palette predates some properties of the block (e.g. stair corners), so look for the state with their defaults
+			$result = $lookup[BlockStateDictionaryEntry::encodeStateProperties(array_merge($data->getStates(), $this->addedPropertyDefaults[$name]))] ?? null;
+		}
+		return $result;
 	}
 
 	/**
@@ -166,12 +197,14 @@ final class BlockStateDictionary{
 	}
 
 	public static function loadFromString(string $blockPaletteContents, string $metaMapContents) : self{
+		$upgrader = GlobalBlockStateHandlers::getUpgrader()->getBlockStateUpgrader();
 		$metaMap = json_decode($metaMapContents, flags: JSON_THROW_ON_ERROR);
 		if(!is_array($metaMap)){
 			throw new \InvalidArgumentException("Invalid metaMap, expected array for root type, got " . get_debug_type($metaMap));
 		}
 
 		$entries = [];
+		$addedPropertyDefaults = [];
 
 		$uniqueNames = [];
 
@@ -191,10 +224,24 @@ final class BlockStateDictionary{
 			if(!is_int($meta)){
 				throw new \InvalidArgumentException("Invalid metaMap offset $i, expected int, got " . get_debug_type($meta));
 			}
-			$uniqueName = $uniqueNames[$state->getName()] ??= $state->getName();
-			$entries[$i] = new BlockStateDictionaryEntry($uniqueName, $state->getStates(), $meta);
+			$newState = $upgrader->upgrade($state);
+			$uniqueName = $uniqueNames[$newState->getName()] ??= $newState->getName();
+			$changed = !$newState->equals($state);
+			$entries[$i] = new BlockStateDictionaryEntry($uniqueName, $newState->getStates(), $meta, $changed ? $state : null);
+
+			//properties added by the upgrader with the same value in every state of the block are defaults
+			$added = $changed ? array_diff_key($newState->getStates(), $state->getStates()) : [];
+			if(!isset($addedPropertyDefaults[$uniqueName])){
+				$addedPropertyDefaults[$uniqueName] = $added;
+				continue;
+			}
+			foreach(Utils::stringifyKeys($addedPropertyDefaults[$uniqueName]) as $propertyName => $default){
+				if(!isset($added[$propertyName]) || !$added[$propertyName]->equals($default)){
+					unset($addedPropertyDefaults[$uniqueName][$propertyName]);
+				}
+			}
 		}
 
-		return new self($entries);
+		return new self($entries, array_filter($addedPropertyDefaults, fn(array $properties) => count($properties) !== 0));
 	}
 }
